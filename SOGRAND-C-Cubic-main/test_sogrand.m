@@ -1,0 +1,109 @@
+clear;
+clc;
+
+num_simulations = 1000;
+
+supported_codes = {[4, 7],[10, 15],[25, 31]};   
+
+successful_decodes = 0;
+total_bit_errors = 0;
+total_bits_simulated = 0;
+
+fprintf('Starting %d simulations with random message sizes...\n\n', num_simulations);
+
+for sim_run = 1:num_simulations
+    
+    code_idx = randi(length(supported_codes));
+    selected_code = supported_codes{3};
+    k = selected_code(1);
+    n = selected_code(2);
+    
+    fprintf('--- Run %d/%d: Using (%d, %d) Code ---\n', sim_run, num_simulations, n, k);
+
+    u = randi([0 1], k, k);
+    total_bits_simulated = total_bits_simulated + k^2;
+
+    [G, H] = getGH_sys_CRC(n, k);
+
+    EbN0dB      = 2.5; 
+    L           = 4;  
+    Imax        = 10; 
+    Tmax        = Inf;
+    p_ET        = 1e-5;
+    thres       = 1 - p_ET;
+    alpha       = 0.5 * ones(1, 50);
+
+    if isequal(mod(sum(G, 2), 2), zeros(k, 1))
+        even = 1;
+    else
+        even = 0;
+    end
+    
+    R = (k / n)^2;
+    EsN0dB = EbN0dB + 10 * log10(2*R);
+    sigma = 1 / sqrt(10^(EsN0dB / 10));
+
+    c = zeros(n, n);
+    for row = 1:k
+        c(row, :) = mod(u(row, :)*G, 2);
+    end
+    for col = 1:n
+        c(:, col) = mod(c(1:k, col)'*G, 2);
+    end
+
+    x = 1 - 2 * c; 
+    
+    flip_row = randi(n);
+    flip_col = randi(n);
+    x(flip_row, flip_col) = -x(flip_row, flip_col);
+    
+    y = x + sigma * randn([n, n]);
+    L_channel = 2 * y / (sigma^2);
+
+    L_APP = zeros(size(L_channel));
+    L_E = zeros(size(L_channel));
+    for i = 1:Imax
+        input_row = L_channel + alpha(2*i-1) * L_E;
+        for row = 1:n
+            [L_APP(row, :), L_E(row, :), ~] = SOGRAND_bitSO(input_row(row, :)', H, L, Tmax, thres, even);
+        end
+        
+        input_col = L_channel + alpha(2*i) * L_E;
+        for col = 1:n
+            [L_APP(:, col), L_E(:, col), ~] = SOGRAND_bitSO(input_col(:, col), H, L, Tmax, thres, even);
+        end
+        
+        c_HD = 0.5 * (1 - sign(L_APP));
+        s1 = mod(c_HD*H', 2);
+        s2 = mod(c_HD'*H', 2);
+        if sum(s1(:)) == 0 && sum(s2(:)) == 0
+            break
+        end
+    end
+    
+    c_HD_final = 0.5 * (1 - sign(L_APP));
+    uhat = c_HD_final(1:k, 1:k);
+
+    if isequal(u, uhat)
+        fprintf('Result: SUCCESS (Error was corrected)\n\n');
+        successful_decodes = successful_decodes + 1;
+    else
+        fprintf('Result: FAILURE (Error was NOT corrected)\n\n');
+        bit_errors_this_run = sum(u(:) ~= uhat(:));
+        total_bit_errors = total_bit_errors + bit_errors_this_run;
+    end
+end
+
+accuracy = (successful_decodes / num_simulations) * 100;
+average_BER = total_bit_errors / total_bits_simulated;
+
+disp('=============================================');
+disp('           FINAL SIMULATION REPORT           ');
+disp('=============================================');
+fprintf('Total Simulations Run:      %d\n', num_simulations);
+fprintf('Successful Decodes:         %d\n', successful_decodes);
+fprintf('Failed Decodes:             %d\n', num_simulations - successful_decodes);
+fprintf('---------------------------------------------\n');
+fprintf('Overall Decoding Accuracy:  %.2f %%\n', accuracy);
+fprintf('Average Bit Error Rate (BER): %f\n', average_BER);
+disp('=============================================');

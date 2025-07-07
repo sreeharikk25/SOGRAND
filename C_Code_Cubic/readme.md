@@ -3,7 +3,7 @@ SOGRAND for Cubic Codes - Pure C Implementation This project is a standalone C-l
 How to Run
 
 Compilation This program is written in standard C and requires the math library. To compile it, open a terminal in the source directory and run:
-gcc sogrand_cubic_sim.c -o sogrand_cubic_sim -lm
+gcc sim_cubic_m1.c -o sim_cubic_m1
 
 Execution After successful compilation, an executable file named sogrand_cubic_sim will be created. Run it from your terminal with the following command:
-./sogrand_cubic_sim
+./sim_cubic_m1

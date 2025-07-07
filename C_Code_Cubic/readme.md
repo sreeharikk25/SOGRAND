@@ -7,5 +7,3 @@ gcc sogrand_cubic_sim.c -o sogrand_cubic_sim -lm
 
 Execution After successful compilation, an executable file named sogrand_cubic_sim will be created. Run it from your terminal with the following command:
 ./sogrand_cubic_sim
-
-The program will then start the Monte Carlo simulation and print the results for each Eb/N0 value to the console.

@@ -62,6 +62,8 @@ int main(int argc, char *argv[]) {
     unsigned char byte_out = 0;
     int bit_count_out = 0;
 
+    clock_t start_time = clock();
+
     while (fread(llr_buffer, sizeof(double), codeword_block_size, fin) == codeword_block_size) {
         double** L_channel = create_double_matrix(n, n);
         for (int r=0; r<n; r++) for (int c=0; c<n; c++) L_channel[r][c] = llr_buffer[r*n + c];
@@ -106,12 +108,21 @@ int main(int argc, char *argv[]) {
 
         free_double_matrix(L_channel, n); free_double_matrix(L_APP, n); free_double_matrix(L_E, n);
     }
+
+    clock_t end_time = clock();
+
     printf("Decoding complete.\n");
     fclose(fin); fclose(fout);
     for(int i=0; i<k; ++i) free(G_dummy[i]);
     free(G_dummy);
     for(int i=0; i<n-k; ++i) free(H[i]);
     free(H);
+
+    double cpu_time_used = ((double) (end_time - start_time)) / CLOCKS_PER_SEC;
+    printf("\n=========================================================\n");
+    printf("Total Simulation Time: %.2f seconds\n", cpu_time_used);
+    printf("=========================================================\n");
+
     return 0;
 }
 

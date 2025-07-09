@@ -1,4 +1,4 @@
-## Simulation Pipelines
+### Simulation Pipelines
 
 There are two primary simulation workflows available:
 

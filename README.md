@@ -17,6 +17,7 @@ There are two primary simulation workflows available:
     ```bash
     ./cubic_flow.sh
     ```
+***
 
 ### Changing the SNR
 To change the $E_b/N_0$ value for a simulation, simply open the corresponding shell script (`square_flow.sh` or `cubic_flow.sh`) in a text editor and modify the `SNR_DB` variable at the top of the file.

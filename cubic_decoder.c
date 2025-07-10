@@ -6,6 +6,10 @@
 #include <time.h>
 #include <stddef.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define Inf 0x7fffffff
 
 typedef struct {
@@ -91,51 +95,59 @@ int main(int argc, char *argv[]) {
     int bit_count_out = 0;
     long total_blocks_decoded = 0;
 
-    while (fread(llr_buffer, sizeof(double), codeword_block_size, fin) == codeword_block_size) {
+    clock_t start_time = clock();
 
+    while (fread(llr_buffer, sizeof(double), codeword_block_size, fin) == codeword_block_size) {
         Tensor_d L_channel = create_tensor_d(n, n, n);
         memcpy(L_channel.data, llr_buffer, codeword_block_size * sizeof(double));
 
         Tensor_d L_APP = create_tensor_d(n, n, n);
-        Tensor_d L_E_cols = create_tensor_d(n, n, n);
-        Tensor_d L_E_rows = create_tensor_d(n, n, n);
-        Tensor_d L_E_slices = create_tensor_d(n, n, n);
+        Tensor_d L_E = create_tensor_d(n, n, n);
         Tensor_d input = create_tensor_d(n, n, n);
-        double vec_in[n], vec_L_APP[n], vec_L_E[n];
+
+        double vec_in[n], vec_L_APP[n], vec_L_E_vec[n];
 
         for (int iter = 1; iter <= Imax; iter++) {
-            // --- DECODE COLUMNS ---
-            for(int j=0; j<codeword_block_size; ++j) input.data[j] = L_channel.data[j] + alpha[0] * (L_E_rows.data[j] + L_E_slices.data[j]);
-            for (int slice = 0; slice < n; slice++) for (int col = 0; col < n; col++) {
-                for(int row=0; row<n; ++row) vec_in[row] = get_tensor_d(input, row, col, slice);
-                SOGRAND_bitSO(vec_L_APP, vec_L_E, NULL, vec_in, H, n, k, L, Tmax, thres, even);
-                for(int row=0; row<n; ++row) {
-                    set_tensor_d(L_APP, row, col, slice, vec_L_APP[row]);
-                    set_tensor_d(L_E_cols, row, col, slice, vec_L_E[row]);
+            double current_alpha = alpha[iter - 1];
+
+            for(int j=0; j<codeword_block_size; ++j) input.data[j] = L_channel.data[j] + current_alpha * L_E.data[j];
+
+            for (int slice = 0; slice < n; slice++) {
+                for (int col = 0; col < n; col++) {
+                    for(int row=0; row<n; ++row) vec_in[row] = get_tensor_d(input, row, col, slice);
+                    SOGRAND_bitSO(vec_L_APP, vec_L_E_vec, NULL, vec_in, H, n, k, L, Tmax, thres, even);
+                    for(int row=0; row<n; ++row) {
+                        set_tensor_d(L_APP, row, col, slice, vec_L_APP[row]);
+                        set_tensor_d(L_E, row, col, slice, vec_L_E_vec[row]);
+                    }
                 }
             }
             if (early_termination(L_APP, G, n, k)) break;
 
-            // --- DECODE ROWS ---
-            for(int j=0; j<codeword_block_size; ++j) input.data[j] = L_channel.data[j] + alpha[0] * (L_E_cols.data[j] + L_E_slices.data[j]);
-            for (int slice = 0; slice < n; slice++) for (int row = 0; row < n; row++) {
-                for(int col=0; col<n; ++col) vec_in[col] = get_tensor_d(input, row, col, slice);
-                SOGRAND_bitSO(vec_L_APP, vec_L_E, NULL, vec_in, H, n, k, L, Tmax, thres, even);
-                for(int col=0; col<n; ++col) {
-                    set_tensor_d(L_APP, row, col, slice, vec_L_APP[col]);
-                    set_tensor_d(L_E_rows, row, col, slice, vec_L_E[col]);
+            for(int j=0; j<codeword_block_size; ++j) input.data[j] = L_channel.data[j] + current_alpha * L_E.data[j];
+
+            for (int slice = 0; slice < n; slice++) {
+                for (int row = 0; row < n; row++) {
+                    for(int col=0; col<n; ++col) vec_in[col] = get_tensor_d(input, row, col, slice);
+                    SOGRAND_bitSO(vec_L_APP, vec_L_E_vec, NULL, vec_in, H, n, k, L, Tmax, thres, even);
+                    for(int col=0; col<n; ++col) {
+                        set_tensor_d(L_APP, row, col, slice, vec_L_APP[col]);
+                        set_tensor_d(L_E, row, col, slice, vec_L_E_vec[col]);
+                    }
                 }
             }
             if (early_termination(L_APP, G, n, k)) break;
 
-            // --- DECODE SLICES ---
-            for(int j=0; j<codeword_block_size; ++j) input.data[j] = L_channel.data[j] + alpha[0] * (L_E_cols.data[j] + L_E_rows.data[j]);
-            for (int row = 0; row < n; row++) for (int col = 0; col < n; col++) {
-                for(int slice_idx=0; slice_idx<n; ++slice_idx) vec_in[slice_idx] = get_tensor_d(input, row, col, slice_idx);
-                SOGRAND_bitSO(vec_L_APP, vec_L_E, NULL, vec_in, H, n, k, L, Tmax, thres, even);
-                for(int slice_idx=0; slice_idx<n; ++slice_idx) {
-                    set_tensor_d(L_APP, row, col, slice_idx, vec_L_APP[slice_idx]);
-                    set_tensor_d(L_E_slices, row, col, slice_idx, vec_L_E[slice_idx]);
+            for(int j=0; j<codeword_block_size; ++j) input.data[j] = L_channel.data[j] + current_alpha * L_E.data[j];
+
+            for (int row = 0; row < n; row++) {
+                for (int col = 0; col < n; col++) {
+                    for(int slice_idx=0; slice_idx<n; ++slice_idx) vec_in[slice_idx] = get_tensor_d(input, row, col, slice_idx);
+                    SOGRAND_bitSO(vec_L_APP, vec_L_E_vec, NULL, vec_in, H, n, k, L, Tmax, thres, even);
+                    for(int slice_idx=0; slice_idx<n; ++slice_idx) {
+                        set_tensor_d(L_APP, row, col, slice_idx, vec_L_APP[slice_idx]);
+                        set_tensor_d(L_E, row, col, slice_idx, vec_L_E_vec[slice_idx]);
+                    }
                 }
             }
             if (early_termination(L_APP, G, n, k)) break;
@@ -158,13 +170,17 @@ int main(int argc, char *argv[]) {
 
         free_tensor_d(L_channel);
         free_tensor_d(L_APP);
-        free_tensor_d(L_E_cols);
-        free_tensor_d(L_E_rows);
-        free_tensor_d(L_E_slices);
+        free_tensor_d(L_E);
         free_tensor_d(input);
-
         total_blocks_decoded++;
     }
+
+    if (bit_count_out > 0) {
+        byte_out <<= (8 - bit_count_out);
+        fwrite(&byte_out, 1, 1, fout);
+    }
+
+    clock_t end_time = clock();
 
     printf("Decoding complete. %ld block(s) decoded.\n", total_blocks_decoded);
     fclose(fin);
@@ -173,19 +189,28 @@ int main(int argc, char *argv[]) {
     free(G);
     for(int i=0; i<n-k; ++i) free(H[i]);
     free(H);
+
+    double cpu_time_used = ((double) (end_time - start_time)) / CLOCKS_PER_SEC;
+    printf("\n=========================================================\n");
+    printf("Total Simulation Time: %.2f seconds\n", cpu_time_used);
+    printf("=========================================================\n");
+
     return 0;
 }
 
 
-
 int early_termination(Tensor_d L_APP, int** G, int n, int k) {
+    // 1. Get the hard decision from the final LLRs
     Tensor_i c_HD = create_tensor_i(n, n, n);
-    for(int i=0; i<n*n*n; ++i) c_HD.data[i] = (L_APP.data[i] > 0) ? 0 : 1;
+    for(int i=0; i<n*n*n; ++i) {
+        c_HD.data[i] = (L_APP.data[i] > 0) ? 0 : 1;
+    }
 
+    // 2. Perform a SYSTEMATIC re-encoding of the message part of c_HD
     Tensor_i c_test = create_tensor_i(n, n, n);
-    int temp_vec[n];
     int temp_vec_k[k];
 
+    // 2a. Copy the systematic message part from the hard decision
     for (int i = 0; i < k; i++) {
         for (int j = 0; j < k; j++) {
             for (int l = 0; l < k; l++) {
@@ -194,47 +219,49 @@ int early_termination(Tensor_d L_APP, int** G, int n, int k) {
         }
     }
 
+    // 2b. Encode rows (calculating parity for columns k through n-1)
     for (int slice = 0; slice < k; slice++) {
         for (int row = 0; row < k; row++) {
-            for(int i=0; i<k; ++i) temp_vec_k[i] = get_tensor_i(c_test, row, i, slice);
-            memset(temp_vec, 0, n * sizeof(int));
-            for (int col = 0; col < n; col++) {
-                for (int g_col = 0; g_col < k; g_col++) {
-                    temp_vec[col] += temp_vec_k[g_col] * G[g_col][col];
-                }
-            }
-            for (int col = 0; col < n; col++) {
-                set_tensor_i(c_test, row, col, slice, temp_vec[col] % 2);
-            }
-        }
-        for (int col = 0; col < n; col++) {
-            for(int i=0; i<k; ++i) temp_vec_k[i] = get_tensor_i(c_test, i, col, slice);
-            memset(temp_vec, 0, n * sizeof(int));
-            for (int row = 0; row < n; row++) {
-                for (int g_col = 0; g_col < k; g_col++) {
-                    temp_vec[row] += temp_vec_k[g_col] * G[g_col][row];
-                }
-            }
-            for (int row = 0; row < n; row++) {
-                set_tensor_i(c_test, row, col, slice, temp_vec[row] % 2);
-            }
-        }
-    }
-    for (int row = 0; row < n; row++) {
-        for (int col = 0; col < n; col++) {
-             for(int i=0; i<k; ++i) temp_vec_k[i] = get_tensor_i(c_test, row, col, i);
-             memset(temp_vec, 0, n * sizeof(int));
-             for (int slice = 0; slice < n; slice++) {
-                 for (int g_col = 0; g_col < k; g_col++) {
-                     temp_vec[slice] += temp_vec_k[g_col] * G[g_col][slice];
+            for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c_test, row, j, slice);
+            for (int col = k; col < n; col++) {
+                 int parity_val = 0;
+                 for (int msg_bit_idx=0; msg_bit_idx<k; ++msg_bit_idx) {
+                     parity_val += temp_vec_k[msg_bit_idx] * G[msg_bit_idx][col];
                  }
-             }
-             for (int slice = 0; slice < n; slice++) {
-                set_tensor_i(c_test, row, col, slice, temp_vec[slice] % 2);
+                 set_tensor_i(c_test, row, col, slice, parity_val % 2);
             }
         }
     }
 
+    // 2c. Encode columns (calculating parity for rows k through n-1)
+    for (int slice = 0; slice < k; slice++) {
+        for (int col = 0; col < n; col++) {
+            for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c_test, j, col, slice);
+            for (int row = k; row < n; row++) {
+                int parity_val = 0;
+                for (int msg_bit_idx=0; msg_bit_idx<k; ++msg_bit_idx) {
+                    parity_val += temp_vec_k[msg_bit_idx] * G[msg_bit_idx][row];
+                }
+                set_tensor_i(c_test, row, col, slice, parity_val % 2);
+            }
+        }
+    }
+
+    // 2d. Encode slices (calculating parity for slices k through n-1)
+    for (int row = 0; row < n; row++) {
+        for (int col = 0; col < n; col++) {
+             for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c_test, row, col, j);
+             for (int slice = k; slice < n; slice++) {
+                 int parity_val = 0;
+                 for (int msg_bit_idx=0; msg_bit_idx<k; ++msg_bit_idx) {
+                    parity_val += temp_vec_k[msg_bit_idx] * G[msg_bit_idx][slice];
+                 }
+                 set_tensor_i(c_test, row, col, slice, parity_val % 2);
+            }
+        }
+    }
+
+    // 3. Compare the re-encoded test codeword with the hard decision
     int is_equal = 1;
     for(int i=0; i<n*n*n; ++i) {
         if (c_HD.data[i] != c_test.data[i]) {
@@ -270,12 +297,6 @@ int get_tensor_i(Tensor_i t, int i, int j, int k) { return t.data[k*t.dim1*t.dim
 void set_tensor_i(Tensor_i t, int i, int j, int k, int val) { t.data[k*t.dim1*t.dim2 + j*t.dim1 + i] = val; }
 double get_tensor_d(Tensor_d t, int i, int j, int k) { return t.data[k*t.dim1*t.dim2 + j*t.dim1 + i]; }
 void set_tensor_d(Tensor_d t, int i, int j, int k, double val) { t.data[k*t.dim1*t.dim2 + j*t.dim1 + i] = val; }
-
-double normal_dist_rand() {
-    double u1 = (double)rand() / (RAND_MAX + 1.0);
-    double u2 = (double)rand() / (RAND_MAX + 1.0);
-    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
-}
 
 void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** H_matrix, int n, int k, int L, uint64_t Tmax, double thres, int even) {
     double* chat_list = (double*)malloc(sizeof(double) * n * L);
@@ -525,7 +546,7 @@ void sogrand_main_logic(double *chat, double *score, double *T, double *curL, do
                 u[k_mt]++;
                 mountain_build(u,k_mt,w,W1,n1);
 
-            } while (++mountain_iter_guard < n*n*n);
+            } while (++mountain_iter_guard < 100000); // Safety break
 
             w++;
             if (even==1 && (w%2 != parity_cHD)) w++;
@@ -552,7 +573,7 @@ void HardDec(uint8_t *c, double *llr, uint64_t n) { for (size_t i = 0; i < n; i+
 int parity(uint8_t array[], uint64_t n) { int sum = 0; for (uint64_t i = 0; i < n; i++) sum += array[i]; return sum % 2; }
 double prob_parity(int parity_cHD, double *absL, uint64_t n) { double p_e = 1.0; for (uint64_t i = 0; i < n; i++) { p_e *= (1.0 - 2.0 * exp(-absL[i]) / (1.0 + exp(-absL[i]))); } p_e = 0.5 * (1.0 + p_e); return (parity_cHD == 0) ? p_e : 1.0 - p_e; }
 void AddTEP(uint8_t *c, uint8_t *cHD, uint8_t *TEP, size_t *perm, uint64_t n) { for (size_t i = 0; i < n; i++) c[perm[i]] = cHD[perm[i]] ^ TEP[i]; }
-double JacLog(double x) { if (x > 50) return x; if (x < -50) return 0.0; return log(1.0 + exp(x)); }
+double JacLog(double x) { if (x > 30) return x; if (x < -30) return 0.0; return log(1.0 + exp(x)); }
 void QuickSort(double *a, size_t *perm, uint64_t n) { if (n < 2) return; double p = a[n / 2]; uint64_t i = 0, j = n - 1; while (i <= j) { while (a[i] < p) i++; while (a[j] > p) j--; if (i <= j) { double t = a[i]; a[i] = a[j]; a[j] = t; size_t tt = perm[i]; perm[i] = perm[j]; perm[j] = tt; i++; j--; } } if (j > 0) QuickSort(a, perm, j + 1); if (i < n) QuickSort(a + i, perm + i, n - i); }
 double getPM_HD(double *absL, uint64_t n) { double pm = 0; for(size_t i=0; i<n; i++) pm += JacLog(-absL[i]); return pm; }
 double getPM(uint8_t *TEP, double *absL, double PM_HD, uint64_t n) { double pm = PM_HD; for(size_t i = 0; i < n; i++) { if (TEP[i] == 1) pm += (JacLog(absL[i]) - JacLog(-absL[i])); } return pm; }

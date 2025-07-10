@@ -16,6 +16,89 @@ int get_tensor_i(Tensor_i t, int i, int j, int k);
 void set_tensor_i(Tensor_i t, int i, int j, int k, int val);
 int* koopman2matlab(const char* k_poly, int* poly_len);
 void getGH_sys_CRC(int n, int k, int** G);
+void encode_block(int* current_bits, FILE* fout, unsigned char* byte_out, int* bit_count_out, int** G, int n, int k);
+
+
+// --- Encoding Function ---
+void encode_block(int* current_bits, FILE* fout, unsigned char* byte_out, int* bit_count_out, int** G, int n, int k) {
+    const int message_block_size = k * k * k;
+    const int codeword_block_size = n * n * n;
+
+    Tensor_i u = create_tensor_i(k, k, k);
+    for(int bit_idx=0; bit_idx < message_block_size; ++bit_idx) {
+        u.data[bit_idx] = current_bits[bit_idx];
+    }
+
+    Tensor_i c = create_tensor_i(n, n, n);
+    int temp_vec_k[k];
+
+    // 1. Systematically embed the message u into the codeword c
+    for (int i = 0; i < k; i++) {
+        for (int j = 0; j < k; j++) {
+            for (int l = 0; l < k; l++) {
+                set_tensor_i(c, i, j, l, get_tensor_i(u, i, j, l));
+            }
+        }
+    }
+
+    // 2. Encode rows (write parity to columns k through n-1)
+    for (int slice = 0; slice < k; slice++) {
+        for (int row = 0; row < k; row++) {
+            for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c, row, j, slice);
+            for (int col = k; col < n; col++) {
+                 int parity_val = 0;
+                 for (int msg_bit_idx=0; msg_bit_idx<k; ++msg_bit_idx) {
+                     parity_val += temp_vec_k[msg_bit_idx] * G[msg_bit_idx][col];
+                 }
+                 set_tensor_i(c, row, col, slice, parity_val % 2);
+            }
+        }
+    }
+
+    // 3. Encode columns (write parity to rows k through n-1)
+    //    This operates on the first k slices, which now contain message and row parity.
+    for (int slice = 0; slice < k; slice++) {
+        for (int col = 0; col < n; col++) {
+            for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c, j, col, slice);
+            for (int row = k; row < n; row++) {
+                int parity_val = 0;
+                for (int msg_bit_idx=0; msg_bit_idx<k; ++msg_bit_idx) {
+                    parity_val += temp_vec_k[msg_bit_idx] * G[msg_bit_idx][row];
+                }
+                set_tensor_i(c, row, col, slice, parity_val % 2);
+            }
+        }
+    }
+
+    // 4. Encode slices (write parity to slices k through n-1)
+    //    This operates on all n x n planes, which are now all filled.
+    for (int row = 0; row < n; row++) {
+        for (int col = 0; col < n; col++) {
+             for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c, row, col, j);
+             for (int slice = k; slice < n; slice++) {
+                 int parity_val = 0;
+                 for (int msg_bit_idx=0; msg_bit_idx<k; ++msg_bit_idx) {
+                    parity_val += temp_vec_k[msg_bit_idx] * G[msg_bit_idx][slice];
+                 }
+                 set_tensor_i(c, row, col, slice, parity_val % 2);
+            }
+        }
+    }
+
+    // Write the full codeword to file
+    for (int bit_idx = 0; bit_idx < codeword_block_size; bit_idx++) {
+        *byte_out = (*byte_out << 1) | c.data[bit_idx];
+        (*bit_count_out)++;
+        if (*bit_count_out == 8) {
+            fwrite(byte_out, 1, 1, fout);
+            *byte_out = 0;
+            *bit_count_out = 0;
+        }
+    }
+    free_tensor_i(u);
+    free_tensor_i(c);
+}
+
 
 // --- Main Application ---
 int main(int argc, char *argv[]) {
@@ -27,18 +110,14 @@ int main(int argc, char *argv[]) {
     const char* input_filename = argv[1];
     const char* output_filename = argv[2];
 
-    // --- Code parameters ---
     const int n = 15;
     const int k = 10;
-    const int message_block_size = k * k * k; // 1000 bits
-    const int codeword_block_size = n * n * n; // 3375 bits
+    const int message_block_size = k * k * k;
 
-    // --- Get Generator (G) matrix ---
     int** G = (int**)malloc(k * sizeof(int*));
     for(int i=0; i<k; ++i) G[i] = (int*)malloc(n * sizeof(int));
     getGH_sys_CRC(n, k, G);
 
-    // --- Open files for I/O ---
     FILE* fin = fopen(input_filename, "rb");
     if (!fin) {
         perror("Error opening input file");
@@ -51,7 +130,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Encoding %s to %s using (n=%d, k=%d) cubic code...\n", input_filename, output_filename, n, k);
+    printf("Encoding %s to %s using SYSTEMATIC (n=%d, k=%d) cubic code...\n", input_filename, output_filename, n, k);
 
     int bit_buffer[message_block_size];
     int bits_in_buffer = 0;
@@ -60,116 +139,25 @@ int main(int argc, char *argv[]) {
     int bit_count_out = 0;
     long total_blocks_encoded = 0;
 
-    // Read input file byte by byte and fill the bit buffer
     while (fread(&byte_in, 1, 1, fin) == 1) {
         for (int i = 7; i >= 0; i--) {
             bit_buffer[bits_in_buffer++] = (byte_in >> i) & 1;
-
-            // When the buffer is full, encode the block
             if (bits_in_buffer == message_block_size) {
-                Tensor_i u = create_tensor_i(k, k, k);
-                for(int bit_idx=0; bit_idx < message_block_size; ++bit_idx) u.data[bit_idx] = bit_buffer[bit_idx];
-
-                Tensor_i c = create_tensor_i(n, n, n);
-                int temp_vec[n];
-                int temp_vec_k[k];
-
-                // --- 3D Encoding Logic ---
-                // 1. For each slice, encode rows then columns
-                for (int slice = 0; slice < k; slice++) {
-                    // Encode rows
-                    for (int row = 0; row < k; row++) {
-                        for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(u, row, j, slice);
-                        memset(temp_vec, 0, n * sizeof(int));
-                        for (int col = 0; col < n; col++) for (int g_col = 0; g_col < k; g_col++) temp_vec[col] += temp_vec_k[g_col] * G[g_col][col];
-                        for (int col = 0; col < n; col++) set_tensor_i(c, row, col, slice, temp_vec[col] % 2);
-                    }
-                    // Encode columns
-                    for (int col = 0; col < n; col++) {
-                        for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c, j, col, slice);
-                        memset(temp_vec, 0, n * sizeof(int));
-                        for (int row = 0; row < n; row++) for (int g_col = 0; g_col < k; g_col++) temp_vec[row] += temp_vec_k[g_col] * G[g_col][row];
-                        for (int row = 0; row < n; row++) set_tensor_i(c, row, col, slice, temp_vec[row] % 2);
-                    }
-                }
-                // 2. Encode across the slices
-                for (int row = 0; row < n; row++) {
-                    for (int col = 0; col < n; col++) {
-                         for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c, row, col, j);
-                         memset(temp_vec, 0, n * sizeof(int));
-                         for (int slice = 0; slice < n; slice++) for (int g_col = 0; g_col < k; g_col++) temp_vec[slice] += temp_vec_k[g_col] * G[g_col][slice];
-                         for (int slice = 0; slice < n; slice++) set_tensor_i(c, row, col, slice, temp_vec[slice] % 2);
-                    }
-                }
-
-                // --- Write the 3375 encoded bits to the output file ---
-                for (int bit_idx = 0; bit_idx < codeword_block_size; bit_idx++) {
-                    byte_out = (byte_out << 1) | c.data[bit_idx];
-                    bit_count_out++;
-                    if (bit_count_out == 8) {
-                        fwrite(&byte_out, 1, 1, fout);
-                        byte_out = 0;
-                        bit_count_out = 0;
-                    }
-                }
-                free_tensor_i(u);
-                free_tensor_i(c);
-                bits_in_buffer = 0; // Reset buffer
+                encode_block(bit_buffer, fout, &byte_out, &bit_count_out, G, n, k);
+                bits_in_buffer = 0;
                 total_blocks_encoded++;
             }
         }
     }
 
-    // --- Handle the last partial block (if any) ---
     if (bits_in_buffer > 0) {
-        // Pad the rest of the buffer with zeros
         for (int i = bits_in_buffer; i < message_block_size; i++) {
             bit_buffer[i] = 0;
         }
-
-        // Encode the final padded block (logic is identical to above)
-        Tensor_i u = create_tensor_i(k, k, k);
-        for(int bit_idx=0; bit_idx < message_block_size; ++bit_idx) u.data[bit_idx] = bit_buffer[bit_idx];
-        Tensor_i c = create_tensor_i(n, n, n);
-        int temp_vec[n];
-        int temp_vec_k[k];
-        for (int slice = 0; slice < k; slice++) {
-            for (int row = 0; row < k; row++) {
-                for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(u, row, j, slice);
-                memset(temp_vec, 0, n * sizeof(int));
-                for (int col = 0; col < n; col++) for (int g_col = 0; g_col < k; g_col++) temp_vec[col] += temp_vec_k[g_col] * G[g_col][col];
-                for (int col = 0; col < n; col++) set_tensor_i(c, row, col, slice, temp_vec[col] % 2);
-            }
-            for (int col = 0; col < n; col++) {
-                for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c, j, col, slice);
-                memset(temp_vec, 0, n * sizeof(int));
-                for (int row = 0; row < n; row++) for (int g_col = 0; g_col < k; g_col++) temp_vec[row] += temp_vec_k[g_col] * G[g_col][row];
-                for (int row = 0; row < n; row++) set_tensor_i(c, row, col, slice, temp_vec[row] % 2);
-            }
-        }
-        for (int row = 0; row < n; row++) {
-            for (int col = 0; col < n; col++) {
-                 for(int j=0; j<k; ++j) temp_vec_k[j] = get_tensor_i(c, row, col, j);
-                 memset(temp_vec, 0, n * sizeof(int));
-                 for (int slice = 0; slice < n; slice++) for (int g_col = 0; g_col < k; g_col++) temp_vec[slice] += temp_vec_k[g_col] * G[g_col][slice];
-                 for (int slice = 0; slice < n; slice++) set_tensor_i(c, row, col, slice, temp_vec[slice] % 2);
-            }
-        }
-        for (int bit_idx = 0; bit_idx < codeword_block_size; bit_idx++) {
-            byte_out = (byte_out << 1) | c.data[bit_idx];
-            bit_count_out++;
-            if (bit_count_out == 8) {
-                fwrite(&byte_out, 1, 1, fout);
-                byte_out = 0;
-                bit_count_out = 0;
-            }
-        }
-        free_tensor_i(u);
-        free_tensor_i(c);
+        encode_block(bit_buffer, fout, &byte_out, &bit_count_out, G, n, k);
         total_blocks_encoded++;
     }
 
-    // Write any remaining bits in the output buffer
     if (bit_count_out > 0) {
         byte_out <<= (8 - bit_count_out);
         fwrite(&byte_out, 1, 1, fout);
@@ -177,7 +165,6 @@ int main(int argc, char *argv[]) {
 
     printf("Encoding complete. %ld block(s) encoded.\n", total_blocks_encoded);
 
-    // --- Cleanup ---
     fclose(fin);
     fclose(fout);
     for(int i=0; i<k; ++i) free(G[i]);

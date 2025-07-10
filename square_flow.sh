@@ -12,15 +12,18 @@ SNR_DB="1.0"
 
 echo "--- Starting SQUARE Code Simulation Pipeline (SNR = ${SNR_DB} dB) ---"
 
-# 1. Generate a random binary file
-./generate_bin
 
-# 2. Compile all necessary C programs
+
+# 1. Compile all necessary C programs
 echo "Compiling programs..."
+gcc generate_bin.c -o generate_bin
 gcc square_encoder.c -o square_encoder -lm
 gcc channel_sim.c -o channel_sim -lm
 gcc square_decoder.c -o square_decoder -lm
 gcc comparator.c -o comparator
+
+# 2. Generate a random binary file
+./generate_bin
 
 # 3. Encode the data using the square encoder
 echo "Encoding data..."

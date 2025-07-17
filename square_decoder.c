@@ -1,17 +1,25 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 #include <time.h>
-#include <stddef.h>
 
 #define Inf 0x7fffffff
 
-int** create_int_matrix(int rows, int cols);
+// --- Forward Declarations ---
 double** create_double_matrix(int rows, int cols);
-void free_int_matrix(int** matrix, int rows);
+int** create_int_matrix(int rows, int cols);
 void free_double_matrix(double** matrix, int rows);
+void free_int_matrix(int** matrix, int rows);
+int* koopman2matlab(const char* k_poly, int* poly_len);
+void getGH_sys_CRC(int n, int k, int** G, int** H);
+int early_termination(double** L_APP, int** G, int n, int k);
+void hard_decision_2d(double** L_APP, int* bits, int n, int k);
+void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** H_matrix, int n, int k, int L, uint64_t Tmax, double thres, int even);
+void sogrand_main_logic(double *chat, double *score, double *T, double *curL, double *pNL, double *APP, double *llr, uint8_t *H, uint64_t n, uint64_t s, int32_t IC, uint64_t L, uint64_t Tmax, double thres, uint8_t even);
+
+// SOGRAND C helper functions
 uint8_t ParityCheck(uint8_t *c, uint8_t *H, uint64_t n, uint64_t s);
 int32_t findMax(int32_t a, int32_t b);
 void HardDec(uint8_t *c, double *llr, uint64_t n);
@@ -19,112 +27,268 @@ int parity(uint8_t array[], uint64_t n);
 double prob_parity(int parity_cHD, double *absL, uint64_t n);
 void AddTEP(uint8_t *c, uint8_t *cHD, uint8_t *TEP, size_t *perm, uint64_t n);
 double JacLog(double x);
-void QuickSort (double *a, size_t *perm, uint64_t n);
+void QuickSort(double *a, size_t *perm, uint64_t n);
 double getPM_HD(double *absL, uint64_t n);
 double getPM(uint8_t *TEP, double *absL, double PM_HD, uint64_t n);
 double getLConf(double *pNL, double P_notGuess, uint64_t cur_L, double *score, uint64_t s, uint8_t even);
 void mountain_build(int32_t *u, int32_t k, int32_t w, int32_t W1, int32_t n1);
 void getAPP(uint64_t cur_L, double *score, double *APP);
-void sogrand_main_logic(double *chat, double *score, double *T, double *curL, double *pNL, double *APP, double *llr, uint8_t *H, uint64_t n, uint64_t s, int32_t IC, uint64_t L, uint64_t Tmax, double thres, uint8_t even);
-int* koopman2matlab(const char* k_poly, int* poly_len);
-void getGH_sys_CRC(int n, int k, int** G, int** H);
-void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** H_matrix, int n, int k, int L, uint64_t Tmax, double thres, int even);
 
+// --- Main Application ---
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-        fprintf(stderr, "Usage: %s <input_llr_file> <output_data_file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input_llr_file> <output_file>\n", argv[0]);
         return 1;
     }
+
     const char* input_filename = argv[1];
     const char* output_filename = argv[2];
-    const int n = 15;
-    const int k = 10;
+
+    const int n = 31;
+    const int k = 25;
     const int codeword_block_size = n * n;
-    const int L = 4, Imax = 10;
-    const uint64_t Tmax = 0;
-    const double p_ET = 1e-5, thres = 1.0 - p_ET;
+    const int message_block_size = k * k;
+
+    int** G = create_int_matrix(k, n);
+    int** H = create_int_matrix(n - k, n);
+    getGH_sys_CRC(n, k, G, H);
+
+    // Check if code is even
+    int even = 1;
+    for (int i = 0; i < k; i++) {
+        int row_sum = 0;
+        for (int j = 0; j < n; j++) {
+            row_sum += G[i][j];
+        }
+        if (row_sum % 2 != 0) {
+            even = 0;
+            break;
+        }
+    }
+
+    const int L = 4;
+    const int Imax = 20;
+    const uint64_t Tmax = UINT64_MAX;
+    const double p_ET = 1e-5;
+    const double thres = 1.0 - p_ET;
+    
+    // Initialize alpha array with 0.5 for all iterations (matching MATLAB)
     double alpha[50];
     for(int i = 0; i < 50; i++) alpha[i] = 0.5;
-    int even = 0;
-
-    int** G_dummy = create_int_matrix(k, n);
-    int** H = create_int_matrix(n - k, n);
-    getGH_sys_CRC(n, k, G_dummy, H);
 
     FILE* fin = fopen(input_filename, "rb");
     if (!fin) { perror("Error opening input file"); return 1; }
     FILE* fout = fopen(output_filename, "wb");
     if (!fout) { perror("Error opening output file"); fclose(fin); return 1; }
 
-    printf("Decoding %s to %s...\n", input_filename, output_filename);
+    printf("Decoding %s to %s using square/product code (n=%d, k=%d)...\n", input_filename, output_filename, n, k);
 
     double llr_buffer[codeword_block_size];
+    int bit_buffer[message_block_size];
     unsigned char byte_out = 0;
     int bit_count_out = 0;
+    
+    int total_NG = 0;
+    int total_NG_p = 0;
+    double total_iterations = 0;
+    int block_count = 0;
 
     clock_t start_time = clock();
 
     while (fread(llr_buffer, sizeof(double), codeword_block_size, fin) == codeword_block_size) {
+        block_count++;
         double** L_channel = create_double_matrix(n, n);
-        for (int r=0; r<n; r++) for (int c=0; c<n; c++) L_channel[r][c] = llr_buffer[r*n + c];
+        for(int idx = 0; idx < codeword_block_size; idx++) {
+            L_channel[idx / n][idx % n] = llr_buffer[idx];
+        }
 
         double** L_APP = create_double_matrix(n, n);
         double** L_E = create_double_matrix(n, n);
-        int N_guess;
+        double** L_A = create_double_matrix(n, n);
+        
+        // Initialize L_E to zeros
+        for(int r = 0; r < n; r++) {
+            for(int c = 0; c < n; c++) {
+                L_E[r][c] = 0.0;
+            }
+        }
+        
+        double n_iter = 0;
+        int NG = 0;
+        int NG_p = 0;
 
         for (int iter = 1; iter <= Imax; iter++) {
-            double** input_row_matrix = create_double_matrix(n, n);
-            for(int r=0; r<n; ++r) for(int c=0; c<n; ++c) input_row_matrix[r][c] = L_channel[r][c] + alpha[2*iter-2] * L_E[r][c];
-            for (int row = 0; row < n; row++) SOGRAND_bitSO(&L_APP[row][0], &L_E[row][0], &N_guess, &input_row_matrix[row][0], H, n, k, L, Tmax, thres, even);
-            free_double_matrix(input_row_matrix, n);
-
-            double** input_col_matrix = create_double_matrix(n, n);
-            for(int r=0; r<n; ++r) for(int c=0; c<n; ++c) input_col_matrix[r][c] = L_channel[r][c] + alpha[2*iter-1] * L_E[r][c];
+            // Rows
+            int NGmax = 0;
+            n_iter += 0.5;
+            
+            double** input_matrix = create_double_matrix(n, n);
+            for(int r = 0; r < n; r++) {
+                for(int c = 0; c < n; c++) {
+                    input_matrix[r][c] = L_channel[r][c] + alpha[2*iter-2] * L_E[r][c];
+                }
+            }
+            
+            for (int row = 0; row < n; row++) {
+                int N_guess = 0;
+                SOGRAND_bitSO(&L_APP[row][0], &L_E[row][0], &N_guess, &input_matrix[row][0], H, n, k, L, Tmax, thres, even);
+                NG += N_guess;
+                if (N_guess > NGmax) NGmax = N_guess;
+            }
+            NG_p += NGmax;
+            free_double_matrix(input_matrix, n);
+            
+            // Early termination check
+            if (early_termination(L_APP, G, n, k)) break;
+            
+            // Columns
+            NGmax = 0;
+            n_iter += 0.5;
+            
+            input_matrix = create_double_matrix(n, n);
+            for(int r = 0; r < n; r++) {
+                for(int c = 0; c < n; c++) {
+                    input_matrix[r][c] = L_channel[r][c] + alpha[2*iter-1] * L_E[r][c];
+                }
+            }
+            
             for (int col = 0; col < n; col++) {
                 double input_col_vec[n], L_APP_col_vec[n], L_E_col_vec[n];
-                for(int r=0; r<n; ++r) input_col_vec[r] = input_col_matrix[r][col];
+                for(int r = 0; r < n; r++) input_col_vec[r] = input_matrix[r][col];
+                int N_guess = 0;
                 SOGRAND_bitSO(L_APP_col_vec, L_E_col_vec, &N_guess, input_col_vec, H, n, k, L, Tmax, thres, even);
-                for(int r=0; r<n; ++r) { L_APP[r][col] = L_APP_col_vec[r]; L_E[r][col] = L_E_col_vec[r]; }
+                NG += N_guess;
+                if (N_guess > NGmax) NGmax = N_guess;
+                for(int r = 0; r < n; r++) { 
+                    L_APP[r][col] = L_APP_col_vec[r]; 
+                    L_E[r][col] = L_E_col_vec[r]; 
+                }
             }
-            free_double_matrix(input_col_matrix, n);
-
-            int** c_HD = create_int_matrix(n, n);
-            for(int r=0; r<n; ++r) for(int c=0; c<n; ++c) c_HD[r][c] = (L_APP[r][c] > 0) ? 0 : 1;
-            int s1_sum = 0;
-            for(int r=0; r<n; ++r) for(int s_row=0; s_row < n-k; ++s_row) {
-                int syn_bit = 0;
-                for(int c=0; c < n; ++c) syn_bit += c_HD[r][c] * H[s_row][c];
-                s1_sum += syn_bit % 2;
-            }
-            free_int_matrix(c_HD, n);
-            if (s1_sum == 0) break;
+            NG_p += NGmax;
+            free_double_matrix(input_matrix, n);
+            
+            // Early termination check
+            if (early_termination(L_APP, G, n, k)) break;
         }
 
-        for (int r = 0; r < k; r++) for (int c = 0; c < k; c++) {
-            int bit = (L_APP[r][c] > 0) ? 0 : 1;
-            byte_out = (byte_out << 1) | bit;
-            if (++bit_count_out == 8) { fwrite(&byte_out, 1, 1, fout); byte_out=0; bit_count_out=0; }
+        total_NG += NG;
+        total_NG_p += NG_p;
+        total_iterations += n_iter;
+
+        // Hard Decode the final L_APP to get the message bits
+        hard_decision_2d(L_APP, bit_buffer, n, k);
+
+        // Convert bit_buffer to bytes and write to output file
+        for (int i = 0; i < message_block_size; i++) {
+            byte_out = (byte_out << 1) | bit_buffer[i];
+            bit_count_out++;
+            if (bit_count_out == 8) {
+                fwrite(&byte_out, 1, 1, fout);
+                byte_out = 0;
+                bit_count_out = 0;
+            }
         }
 
-        free_double_matrix(L_channel, n); free_double_matrix(L_APP, n); free_double_matrix(L_E, n);
+        free_double_matrix(L_channel, n);
+        free_double_matrix(L_APP, n);
+        free_double_matrix(L_E, n);
+        free_double_matrix(L_A, n);
+    }
+
+    if (bit_count_out > 0) {
+        byte_out <<= (8 - bit_count_out);
+        fwrite(&byte_out, 1, 1, fout);
     }
 
     clock_t end_time = clock();
-
-    printf("Decoding complete.\n");
-    fclose(fin); fclose(fout);
-    for(int i=0; i<k; ++i) free(G_dummy[i]);
-    free(G_dummy);
-    for(int i=0; i<n-k; ++i) free(H[i]);
-    free(H);
-
     double cpu_time_used = ((double) (end_time - start_time)) / CLOCKS_PER_SEC;
-    printf("\n=========================================================\n");
-    printf("Total Simulation Time: %.2f seconds\n", cpu_time_used);
-    printf("=========================================================\n");
+
+    printf("Decoding complete. %d block(s) decoded.\n", block_count);
+    printf("Average iterations per block: %.2f\n", total_iterations / block_count);
+    printf("Average NG per block: %.2f\n", (double)total_NG / block_count);
+    printf("Average NG per info bit: %.2f\n", (double)total_NG / (block_count * k * k));
+    printf("Average NG_p per block: %.2f\n", (double)total_NG_p / block_count);
+    printf("Total CPU time: %.2f seconds\n", cpu_time_used);
+
+    fclose(fin);
+    fclose(fout);
+    free_int_matrix(G, k);
+    free_int_matrix(H, n - k);
 
     return 0;
 }
+
+// --- Helper Functions ---
+
+int early_termination(double** L_APP, int** G, int n, int k) {
+    // 1. Get the hard decision from the final LLRs
+    int** c_HD = create_int_matrix(n, n);
+    for(int r = 0; r < n; r++) {
+        for(int c = 0; c < n; c++) {
+            c_HD[r][c] = (L_APP[r][c] > 0) ? 0 : 1;
+        }
+    }
+
+    // 2. Re-encode systematically
+    int** c_test = create_int_matrix(n, n);
+    
+    // Copy the systematic part
+    for(int r = 0; r < k; r++) {
+        for(int c = 0; c < k; c++) {
+            c_test[r][c] = c_HD[r][c];
+        }
+    }
+    
+    // Encode rows
+    for (int row = 0; row < k; row++) {
+        for (int col = k; col < n; col++) {
+            int parity = 0;
+            for (int j = 0; j < k; j++) {
+                parity += c_test[row][j] * G[j][col];
+            }
+            c_test[row][col] = parity % 2;
+        }
+    }
+    
+    // Encode columns
+    for (int col = 0; col < n; col++) {
+        for (int row = k; row < n; row++) {
+            int parity = 0;
+            for (int j = 0; j < k; j++) {
+                parity += c_test[j][col] * G[j][row];
+            }
+            c_test[row][col] = parity % 2;
+        }
+    }
+    
+    // 3. Check if re-encoded matches hard decision
+    int match = 1;
+    for(int r = 0; r < n; r++) {
+        for(int c = 0; c < n; c++) {
+            if (c_test[r][c] != c_HD[r][c]) {
+                match = 0;
+                break;
+            }
+        }
+        if (!match) break;
+    }
+    
+    free_int_matrix(c_HD, n);
+    free_int_matrix(c_test, n);
+    return match;
+}
+
+void hard_decision_2d(double** L_APP, int* bits, int n, int k) {
+    // Extract information bits from positions [0:k, 0:k]
+    int bit_idx = 0;
+    for(int r = 0; r < k; r++) {
+        for(int c = 0; c < k; c++) {
+            bits[bit_idx++] = (L_APP[r][c] > 0) ? 0 : 1;
+        }
+    }
+}
+
+// --- Existing Functions ---
 
 void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** H_matrix, int n, int k, int L, uint64_t Tmax, double thres, int even) {
     double* chat_list = (double*)malloc(sizeof(double) * n * L);
@@ -200,7 +364,9 @@ void getGH_sys_CRC(int n, int k, int** G, int** H) {
     if (r == 3) hex_poly = "0x5";
     else if (r == 4) hex_poly = "0x9";
     else if (r == 5 && k <= 10) hex_poly = "0x15";
+    else if (r == 5 && k <= 26) hex_poly = "0x12";
     else if (r == 6 && k <= 25) hex_poly = "0x23";
+    else if (r == 6 && k <= 57) hex_poly = "0x33";
     else {
         fprintf(stderr, "Error: (n, k) = (%d, %d) is not supported.\n", n, k);
         exit(1);
@@ -209,7 +375,8 @@ void getGH_sys_CRC(int n, int k, int** G, int** H) {
     int poly_len;
     int* poly = koopman2matlab(hex_poly, &poly_len);
 
-    int** P = create_int_matrix(k, r);
+    int** P = (int**)malloc(k * sizeof(int*));
+    for(int i=0; i<k; ++i) P[i] = (int*)malloc(r * sizeof(int));
     int* msg_poly = (int*)calloc(k + r, sizeof(int));
 
     for (int i = 0; i < k; i++) {
@@ -227,18 +394,19 @@ void getGH_sys_CRC(int n, int k, int** G, int** H) {
     }
 
     for (int i = 0; i < k; i++) {
-        G[i][i] = 1;
+        for (int j = 0; j < k; j++) G[i][j] = (i == j) ? 1 : 0;
         for (int j = 0; j < r; j++) G[i][k + j] = P[i][j];
     }
 
     for (int i = 0; i < r; i++) {
         for (int j = 0; j < k; j++) H[i][j] = P[j][i];
-        H[i][k + i] = 1;
+        for (int j = 0; j < r; j++) H[i][k + j] = (i == j) ? 1 : 0;
     }
 
     free(poly);
     free(msg_poly);
-    free_int_matrix(P, k);
+    for(int i=0; i<k; ++i) free(P[i]);
+    free(P);
 }
 
 int* koopman2matlab(const char* k_poly, int* poly_len) {
@@ -256,22 +424,26 @@ int* koopman2matlab(const char* k_poly, int* poly_len) {
 }
 
 void sogrand_main_logic(double *chat, double *score, double *T, double *curL, double *pNL, double *APP, double *llr, uint8_t *H, uint64_t n, uint64_t s, int32_t IC, uint64_t L, uint64_t Tmax, double thres, uint8_t even){
+    /* Create vectors */
     size_t *perm = calloc(n, sizeof(size_t));
     uint8_t *cHD = calloc(n, sizeof(uint8_t));
+    uint8_t parity_cHD;
     uint8_t *TEP = calloc(n, sizeof(uint8_t));
     uint8_t *c   = calloc(n, sizeof(uint8_t));
     double *absL = calloc(n, sizeof(double));
     int32_t *u   = calloc(n, sizeof(int32_t));
     int32_t *d   = calloc(n, sizeof(int32_t));
     int32_t *D   = calloc(n, sizeof(int32_t));
-
-    for(size_t i = 0; i < n; i++) perm[i] = i;
-    for(size_t i = 0; i < 4*L; i++) score[i] = 0;
-    for(size_t i = 0; i < L; i++) APP[i] = 0;
-
+    for(size_t i = 0; i < n; i++)
+        perm[i] = i;
+    for(size_t i = 0; i < 4*L; i++)
+        score[i] = 0;
+    for(size_t i = 0; i < L; i++)
+        APP[i] = 0;
     uint64_t cur_L = 0;
+    /* Initialize */
     HardDec(cHD, llr, n);
-    uint8_t parity_cHD = parity(cHD,n);
+    parity_cHD = parity(cHD,n);
     pNL[0] = 0.0;
 
     if (Tmax==0) Tmax=Inf;

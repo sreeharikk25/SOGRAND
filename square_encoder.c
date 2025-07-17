@@ -19,10 +19,10 @@ int main(int argc, char *argv[]) {
     const char* input_filename = argv[1];
     const char* output_filename = argv[2];
 
-    const int n = 15;
-    const int k = 10;
-    const int message_block_size = k * k; // 100 bits
-    const int codeword_block_size = n * n; // 225 bits
+    const int n = 31;
+    const int k = 25;
+    const int message_block_size = k * k; // 625 bits
+    const int codeword_block_size = n * n; // 961 bits
 
     int** G = create_int_matrix(k, n);
     getGH_sys_CRC(n, k, G);
@@ -106,4 +106,49 @@ int main(int argc, char *argv[]) {
 int** create_int_matrix(int r, int c) { int** m = (int**)malloc(r * sizeof(int*)); for (int i = 0; i < r; i++) m[i] = (int*)calloc(c, sizeof(int)); return m; }
 void free_int_matrix(int** m, int r) { for (int i = 0; i < r; i++) free(m[i]); free(m); }
 int* koopman2matlab(const char* p, int* l) { long long v = strtoll(p, NULL, 16); int len = (v > 0) ? floor(log2(v)) + 1 : 1; *l = len + 1; int* poly = (int*)malloc(sizeof(int) * (*l)); for (int i=0; i<len; i++) poly[i] = (v >> (len-1-i)) & 1; poly[len] = 1; return poly; }
-void getGH_sys_CRC(int n, int k, int** G) { const char* p = NULL; int r = n - k; if (r==5 && k==10) p = "0x15"; else { fprintf(stderr, "Error: Unsupported (n,k) pair.\n"); exit(1); } int l; int* poly = koopman2matlab(p, &l); int** P = create_int_matrix(k, r); int* msg = (int*)calloc(k+r, sizeof(int)); for (int i=0; i<k; i++) { memset(msg, 0, (k+r)*sizeof(int)); msg[i] = 1; for (int j=0; j<k; j++) if (msg[j]==1) for (int m=0; m<l; m++) msg[j+m] ^= poly[m]; for (int j=0; j<r; j++) P[i][j] = msg[k+j]; } for (int i=0; i<k; i++) { G[i][i] = 1; for (int j=0; j<r; j++) G[i][k+j] = P[i][j]; } free(poly); free(msg); free_int_matrix(P, k); }
+void getGH_sys_CRC(int n, int k, int** G) {
+    const char* hex_poly = NULL;
+    int r = n - k;
+    
+    if (r == 3) hex_poly = "0x5";
+    else if (r == 4) hex_poly = "0x9";
+    else if (r == 5 && k <= 10) hex_poly = "0x15";
+    else if (r == 5 && k <= 26) hex_poly = "0x12";
+    else if (r == 6 && k <= 25) hex_poly = "0x23";
+    else if (r == 6 && k <= 57) hex_poly = "0x33";
+    else {
+        fprintf(stderr, "Error: (n, k) = (%d, %d) is not supported.\n", n, k);
+        exit(1);
+    }
+    
+    int poly_len;
+    int* poly = koopman2matlab(hex_poly, &poly_len);
+    
+    int** P = (int**)malloc(k * sizeof(int*));
+    for(int i=0; i<k; ++i) P[i] = (int*)malloc(r * sizeof(int));
+    int* msg_poly = (int*)calloc(k + r, sizeof(int));
+    
+    for (int i = 0; i < k; i++) {
+        memset(msg_poly, 0, (k + r) * sizeof(int));
+        msg_poly[i] = 1;
+        
+        for (int j = 0; j < k; j++) {
+            if (msg_poly[j] == 1) {
+                for (int l = 0; l < poly_len; l++) {
+                    msg_poly[j + l] ^= poly[l];
+                }
+            }
+        }
+        for (int j = 0; j < r; j++) P[i][j] = msg_poly[k + j];
+    }
+    
+    for (int i = 0; i < k; i++) {
+        for (int j = 0; j < k; j++) G[i][j] = (i == j) ? 1 : 0;
+        for (int j = 0; j < r; j++) G[i][k + j] = P[i][j];
+    }
+    
+    free(poly);
+    free(msg_poly);
+    for(int i=0; i<k; ++i) free(P[i]);
+    free(P);
+}

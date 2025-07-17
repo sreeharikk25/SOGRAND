@@ -187,30 +187,42 @@ void set_tensor_i(Tensor_i t, int i, int j, int k, int val) { t.data[k*t.dim1*t.
 void getGH_sys_CRC(int n, int k, int** G) {
     const char* hex_poly = NULL;
     int r = n - k;
-    if (r == 5 && k == 10) hex_poly = "0x15";
-    else { fprintf(stderr, "Error: Unsupported (n,k) pair (%d,%d).\n", n, k); exit(1); }
+
+    if (r == 3) hex_poly = "0x5";
+    else if (r == 4) hex_poly = "0x9";
+    else if (r == 5 && k <= 10) hex_poly = "0x15";
+    else if (r == 5 && k <= 26) hex_poly = "0x12";
+    else if (r == 6 && k <= 25) hex_poly = "0x23";
+    else if (r == 6 && k <= 57) hex_poly = "0x33";
+    else {
+        fprintf(stderr, "Error: (n, k) = (%d, %d) is not supported.\n", n, k);
+        exit(1);
+    }
 
     int poly_len;
     int* poly = koopman2matlab(hex_poly, &poly_len);
 
     int** P = (int**)malloc(k * sizeof(int*));
     for(int i=0; i<k; ++i) P[i] = (int*)malloc(r * sizeof(int));
-
     int* msg_poly = (int*)calloc(k + r, sizeof(int));
+
     for (int i = 0; i < k; i++) {
         memset(msg_poly, 0, (k + r) * sizeof(int));
         msg_poly[i] = 1;
+
         for (int j = 0; j < k; j++) {
             if (msg_poly[j] == 1) {
-                for (int l = 0; l < poly_len; l++) msg_poly[j + l] ^= poly[l];
+                for (int l = 0; l < poly_len; l++) {
+                    msg_poly[j + l] ^= poly[l];
+                }
             }
         }
         for (int j = 0; j < r; j++) P[i][j] = msg_poly[k + j];
     }
 
     for (int i = 0; i < k; i++) {
-        G[i][i] = 1; // Identity part
-        for (int j = 0; j < r; j++) G[i][k + j] = P[i][j]; // Parity part
+        for (int j = 0; j < k; j++) G[i][j] = (i == j) ? 1 : 0;
+        for (int j = 0; j < r; j++) G[i][k + j] = P[i][j];
     }
 
     free(poly);

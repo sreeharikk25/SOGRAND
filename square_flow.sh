@@ -8,7 +8,7 @@ CORRUPTED_LLRS="corrupted_llrs_square.bin"
 DECODED_DATA="decoded_square.bin"
 
 # Define SNR
-SNR_DB="1.0"
+SNR_DB="2.0"
 
 echo "--- Starting SQUARE Code Simulation Pipeline (SNR = ${SNR_DB} dB) ---"
 

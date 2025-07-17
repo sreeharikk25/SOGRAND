@@ -8,7 +8,7 @@ CORRUPTED_LLRS="corrupted_llrs_cubic.bin"
 DECODED_DATA="decoded_cubic.bin"
 
 # Define SNR in dB for the channel
-SNR_DB="1.0"
+SNR_DB="2.0"
 
 echo "--- Starting CUBIC Code Simulation Pipeline (SNR = ${SNR_DB} dB) ---"
 

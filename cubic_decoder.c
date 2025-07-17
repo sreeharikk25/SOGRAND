@@ -589,12 +589,15 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
     if (parity_cHD==0 || even==0) pNL_val[0] = exp(-getPM(TEP, absL, PM_HD, n));
 
     if (ParityCheck(c, H_flat, n, s) == 1){
-        APP_list[0] = getPM(TEP, absL, PM_HD, n);
+        double pm = getPM(TEP, absL, PM_HD, n);
+        APP_list[0] = pm;
         for(size_t i=0; i<n; i++) chat_list[i] = c[i];
-        s_list[1] = 1; // T
+        s_list[0] = pm; // PM value at index 0
+        s_list[1] = pm; // PM value at index 1 (used by getLConf and getAPP)
         s_list[2] = T_val[0]; // N
         s_list[3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even); // Conf
         cur_L++;
+        if (even == 1) P_notGuess -= exp(-pm);  // Decrement P_notGuess after guess
         if ((s_list[3] > thres) || (cur_L == L)){
             getAPP(cur_L, s_list, APP_list);
             curL_val[0] = cur_L;
@@ -634,12 +637,15 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
                 if (parity_cHD==0 || even==0) pNL_val[0] = exp(-getPM(TEP, absL, PM_HD, n));
 
                 if (ParityCheck(c, H_flat, n, s) == 1){
-                    APP_list[cur_L] = wt;
+                    double pm = getPM(TEP, absL, PM_HD, n);
+                    APP_list[cur_L] = pm;
                     for(size_t i=0; i<n; i++) chat_list[cur_L*n + i] = c[i];
-                    s_list[4*cur_L+1] = wt; // T
+                    s_list[4*cur_L] = pm; // PM value at index 4*cur_L
+                    s_list[4*cur_L+1] = pm; // PM value at index 4*cur_L+1 (used by getLConf and getAPP)
                     s_list[4*cur_L+2] = T_val[0]; // N
                     s_list[4*cur_L+3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even); // Conf
                     cur_L++;
+                    if (even == 1) P_notGuess -= exp(-pm);  // Decrement P_notGuess after guess
                     if ((s_list[4*(cur_L-1)+3] > thres) || (cur_L == L)){
                         getAPP(cur_L, s_list, APP_list);
                         curL_val[0] = cur_L;

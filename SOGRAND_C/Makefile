@@ -12,7 +12,7 @@ TARGETS = square_encoder cubic_encoder cubic_decoder square_decoder generate_bin
 all: $(TARGETS)
 
 # Object files
-OBJS = square_encoder.o cubic_encoder.o cubic_decoder.o square_decoder.o generate_bin.o channel_sim.o comparator.o
+OBJS = square_encoder.o cubic_encoder.o cubic_decoder.o square_decoder.o generate_bin.o channel_sim.o comparator.o crc_polynomials.o bch_codes.o
 
 # Rules for each executable
 
@@ -22,10 +22,10 @@ square_encoder: square_encoder.o
 cubic_encoder: cubic_encoder.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-cubic_decoder: cubic_decoder.o
+cubic_decoder: cubic_decoder.o crc_polynomials.o bch_codes.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-square_decoder: square_decoder.o
+square_decoder: square_decoder.o crc_polynomials.o bch_codes.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 generate_bin: generate_bin.o

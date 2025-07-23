@@ -152,17 +152,14 @@ int* koopman2matlab(const char* k_poly, int* poly_len) {
     return poly;
 }
 
+// External function for complete CRC polynomial selection
+extern "C" const char* select_crc_polynomial(int n, int k);
+
 void getGH_sys_CRC(int n, int k, int* G_flat) {
-    const char* hex_poly = NULL;
+    const char* hex_poly = select_crc_polynomial(n, k);
     int r = n - k;
     
-    if (r == 3) hex_poly = "0x5";
-    else if (r == 4) hex_poly = "0x9";
-    else if (r == 5 && k <= 10) hex_poly = "0x15";
-    else if (r == 5 && k <= 26) hex_poly = "0x12";
-    else if (r == 6 && k <= 25) hex_poly = "0x23";
-    else if (r == 6 && k <= 57) hex_poly = "0x33";
-    else {
+    if (hex_poly == NULL) {
         fprintf(stderr, "Error: (n, k) = (%d, %d) is not supported.\n", n, k);
         exit(1);
     }

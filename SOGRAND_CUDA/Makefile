@@ -26,14 +26,14 @@ all: $(ALL_TARGETS)
 cuda_channel_sim: cuda_channel_sim.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
-cuda_square_encoder: cuda_square_encoder.cu
-	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
+cuda_square_encoder: cuda_square_encoder.cu crc_polynomials.cu
+	$(NVCC) $(CUDA_FLAGS) -o $@ $^ $(CUDA_LIBS)
 
 cuda_square_decoder: cuda_square_decoder.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
-cuda_cubic_encoder: cuda_cubic_encoder.cu
-	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
+cuda_cubic_encoder: cuda_cubic_encoder.cu crc_polynomials.cu
+	$(NVCC) $(CUDA_FLAGS) -o $@ $^ $(CUDA_LIBS)
 
 cuda_cubic_decoder: cuda_cubic_decoder.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)

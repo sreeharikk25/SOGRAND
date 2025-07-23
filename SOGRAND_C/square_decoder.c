@@ -357,17 +357,14 @@ void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** 
 }
 
 
+// External function for complete CRC polynomial selection
+extern const char* select_crc_polynomial(int n, int k);
+
 void getGH_sys_CRC(int n, int k, int** G, int** H) {
-    const char* hex_poly = NULL;
+    const char* hex_poly = select_crc_polynomial(n, k);
     int r = n - k;
 
-    if (r == 3) hex_poly = "0x5";
-    else if (r == 4) hex_poly = "0x9";
-    else if (r == 5 && k <= 10) hex_poly = "0x15";
-    else if (r == 5 && k <= 26) hex_poly = "0x12";
-    else if (r == 6 && k <= 25) hex_poly = "0x23";
-    else if (r == 6 && k <= 57) hex_poly = "0x33";
-    else {
+    if (hex_poly == NULL) {
         fprintf(stderr, "Error: (n, k) = (%d, %d) is not supported.\n", n, k);
         exit(1);
     }

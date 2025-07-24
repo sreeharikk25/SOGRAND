@@ -17,15 +17,15 @@ echo "--- Starting CUDA Square Code Simulation Pipeline (SNR = ${SNR_DB} dB) ---
 
 # 2. Encode the data using the CUDA square encoder
 echo "Encoding data with CUDA..."
-time ./cuda_square_encoder ${ORIG_DATA} ${ENCODED_DATA}
+time ./square_encoder ${ORIG_DATA} ${ENCODED_DATA}
 
 # 3. Simulate the AWGN channel with CUDA
 echo "Simulating channel with CUDA..."
-time ./cuda_channel_sim ${ENCODED_DATA} ${CORRUPTED_LLRS} ${SNR_DB} 2
+time ./channel_sim ${ENCODED_DATA} ${CORRUPTED_LLRS} ${SNR_DB} 2
 
 # 4. Decode the LLRs with CUDA
 echo "Decoding data with CUDA..."
-time ./cuda_square_decoder ${CORRUPTED_LLRS} ${DECODED_DATA}
+time ./square_decoder ${CORRUPTED_LLRS} ${DECODED_DATA}
 
 # 5. Compare the original and decoded files
 echo "Comparing results..."

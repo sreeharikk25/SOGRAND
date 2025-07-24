@@ -17,8 +17,8 @@
 // Generator matrix in constant memory
 __constant__ int d_G[10*15];
 
-// 3D tensor access
-__device__ inline int tensor_idx(int i, int j, int k, int n) {
+// FIXED: 3D tensor access - both host and device versions
+__host__ __device__ inline int tensor_idx(int i, int j, int k, int n) {
     return k * n * n + j * n + i;
 }
 

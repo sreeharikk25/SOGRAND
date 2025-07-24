@@ -20,8 +20,8 @@
 __constant__ int d_G[10*15];  // Generator matrix
 __constant__ int d_H[5*15];   // Parity check matrix
 
-// 3D tensor access helpers
-__device__ inline int tensor_idx(int i, int j, int k, int n) {
+// FIXED: 3D tensor access helpers - both host and device versions
+__host__ __device__ inline int tensor_idx(int i, int j, int k, int n) {
     return k * n * n + j * n + i;
 }
 
@@ -160,7 +160,7 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
     }
 }
 
-// Kernel for column decoding (dimension 1)
+// FIXED: Kernel for column decoding with reduced shared memory
 __global__ void decode_columns_cubic_kernel(double* L_channel, double* L_APP, double* L_E,
                                            double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.z;
@@ -169,8 +169,9 @@ __global__ void decode_columns_cubic_kernel(double* L_channel, double* L_APP, do
     
     if (block_id >= num_blocks || slice >= n || col >= n) return;
     
-    __shared__ SOGRANDState15 states[16];  // Adjust based on threads
-    SOGRANDState15* state = &states[threadIdx.x % 16];
+    // FIXED: Reduced shared memory usage
+    __shared__ SOGRANDState15 states[4];  // Reduced from 16 to 4
+    SOGRANDState15* state = &states[threadIdx.x % 4];
     
     int offset = block_id * n * n * n;
     
@@ -193,7 +194,7 @@ __global__ void decode_columns_cubic_kernel(double* L_channel, double* L_APP, do
     }
 }
 
-// Kernel for row decoding (dimension 2)
+// FIXED: Kernel for row decoding with reduced shared memory
 __global__ void decode_rows_cubic_kernel(double* L_channel, double* L_APP, double* L_E,
                                          double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.z;
@@ -202,8 +203,9 @@ __global__ void decode_rows_cubic_kernel(double* L_channel, double* L_APP, doubl
     
     if (block_id >= num_blocks || slice >= n || row >= n) return;
     
-    __shared__ SOGRANDState15 states[16];
-    SOGRANDState15* state = &states[threadIdx.x % 16];
+    // FIXED: Reduced shared memory usage
+    __shared__ SOGRANDState15 states[4];  // Reduced from 16 to 4
+    SOGRANDState15* state = &states[threadIdx.x % 4];
     
     int offset = block_id * n * n * n;
     
@@ -226,7 +228,7 @@ __global__ void decode_rows_cubic_kernel(double* L_channel, double* L_APP, doubl
     }
 }
 
-// Kernel for slice decoding (dimension 3)
+// FIXED: Kernel for slice decoding with reduced shared memory
 __global__ void decode_slices_cubic_kernel(double* L_channel, double* L_APP, double* L_E,
                                           double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.z;
@@ -235,8 +237,9 @@ __global__ void decode_slices_cubic_kernel(double* L_channel, double* L_APP, dou
     
     if (block_id >= num_blocks || row >= n || col >= n) return;
     
-    __shared__ SOGRANDState15 states[16];
-    SOGRANDState15* state = &states[threadIdx.x % 16];
+    // FIXED: Reduced shared memory usage
+    __shared__ SOGRANDState15 states[4];  // Reduced from 16 to 4
+    SOGRANDState15* state = &states[threadIdx.x % 4];
     
     int offset = block_id * n * n * n;
     
@@ -307,12 +310,13 @@ void decode_cubic_cuda(double* h_llr_buffer, int* h_bit_buffer, int num_blocks,
     CHECK_CUDA(cudaMemcpy(h_L_APP, d_L_APP, num_blocks * tensor_size, 
                           cudaMemcpyDeviceToHost));
     
-    // Hard decision to get bits from [0:k, 0:k, 0:k]
+    // FIXED: Hard decision to get bits from [0:k, 0:k, 0:k] - now works on host
     for (int b = 0; b < num_blocks; b++) {
         int bit_idx = 0;
         for (int slice = 0; slice < k; slice++) {
             for (int row = 0; row < k; row++) {
                 for (int col = 0; col < k; col++) {
+                    // This now works because tensor_idx is __host__ __device__
                     int llr_idx = b * n * n * n + tensor_idx(row, col, slice, n);
                     h_bit_buffer[b * k * k * k + bit_idx] = (h_L_APP[llr_idx] > 0) ? 0 : 1;
                     bit_idx++;
@@ -363,7 +367,6 @@ int main(int argc, char *argv[]) {
     const int k = 10;
     const int codeword_block_size = n * n * n;
     const int message_block_size = k * k * k;
-    const int L = 3;
     const int Imax = 30;
     
     // Initialize alpha array

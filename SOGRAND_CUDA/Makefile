@@ -12,8 +12,8 @@ CC = gcc
 CFLAGS = -O3 -lm
 
 # Target executables
-CUDA_TARGETS = cuda_channel_sim cuda_square_encoder cuda_square_decoder \
-               cuda_cubic_encoder cuda_cubic_decoder
+CUDA_TARGETS = channel_sim square_encoder square_decoder \
+               cubic_encoder cubic_decoder
 
 C_TARGETS = generate_bin comparator
 
@@ -23,19 +23,19 @@ ALL_TARGETS = $(CUDA_TARGETS) $(C_TARGETS)
 all: $(ALL_TARGETS)
 
 # CUDA programs
-cuda_channel_sim: cuda_channel_sim.cu
+channel_sim: channel_sim.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
-cuda_square_encoder: cuda_square_encoder.cu
+square_encoder: square_encoder.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
-cuda_square_decoder: cuda_square_decoder.cu
+square_decoder: square_decoder.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
-cuda_cubic_encoder: cuda_cubic_encoder.cu
+cubic_encoder: cubic_encoder.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
-cuda_cubic_decoder: cuda_cubic_decoder.cu
+cubic_decoder: cubic_decoder.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
 # C programs (unchanged)

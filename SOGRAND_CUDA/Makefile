@@ -14,7 +14,8 @@ CFLAGS = -O3 -lm
 # Target executables
 CUDA_TARGETS = channel_sim square_encoder square_decoder \
                cubic_encoder cubic_decoder \
-               square_decoder_fixed cubic_decoder_fixed
+               square_decoder_fixed cubic_decoder_fixed \
+               cubic_encoder_fixed
 
 C_TARGETS = generate_bin comparator
 
@@ -37,6 +38,9 @@ square_decoder_fixed: square_decoder_fixed.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
 cubic_encoder: cubic_encoder.cu
+	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
+
+cubic_encoder_fixed: cubic_encoder_fixed.cu
 	$(NVCC) $(CUDA_FLAGS) -o $@ $< $(CUDA_LIBS)
 
 cubic_decoder: cubic_decoder.cu
@@ -91,9 +95,9 @@ test_cubic: all
 test_cubic_fixed: all
 	@echo "Running fixed cubic code test..."
 	./generate_bin
-	./cubic_encoder original_data.bin encoded_cubic.bin
-	./channel_sim encoded_cubic.bin corrupted_llrs_cubic.bin 2.0 3
-	./cubic_decoder_fixed corrupted_llrs_cubic.bin decoded_cubic_fixed.bin
+	./cubic_encoder_fixed original_data.bin encoded_cubic_fixed.bin
+	./channel_sim encoded_cubic_fixed.bin corrupted_llrs_cubic_fixed.bin 2.0 3
+	./cubic_decoder_fixed corrupted_llrs_cubic_fixed.bin decoded_cubic_fixed.bin
 	./comparator original_data.bin decoded_cubic_fixed.bin
 
 # Performance comparison

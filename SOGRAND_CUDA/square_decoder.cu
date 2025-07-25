@@ -52,23 +52,23 @@ __device__ bool parity_check_cuda(uint8_t* c, int n, int s) {
         for (int i = 0; i < n; i++) {
             syndrome ^= (c[i] * d_H[j*n + i]);
         }
-        if (syndrome == 1) return false;
+        if (syndrome != 0) return false;  // Fixed: should be != 0, not == 1
     }
     return true;
 }
 
 // Simplified SOGRAND kernel for a single row/column
-__device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr, 
+__device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
                                   int n, int k, SOGRANDState* state) {
     // Initialize
     hard_decision_cuda(llr, state->cHD, n);
-    
+
     // Sort by reliability (simplified - using bubble sort for now)
     for (int i = 0; i < n; i++) {
         state->absL[i] = fabs(llr[i]);
         state->perm[i] = i;
     }
-    
+
     // Simple bubble sort (can be optimized with parallel sorting)
     for (int i = 0; i < n-1; i++) {
         for (int j = 0; j < n-i-1; j++) {
@@ -82,15 +82,15 @@ __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
             }
         }
     }
-    
+
     // Copy hard decision
     for (int i = 0; i < n; i++) {
         state->c[i] = state->cHD[i];
     }
-    
+
     state->curL = 0;
     state->T = 1;
-    
+
     // Check if hard decision is valid
     if (parity_check_cuda(state->c, n, n-k)) {
         for (int i = 0; i < n; i++) {
@@ -98,21 +98,21 @@ __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
         }
         state->curL = 1;
     }
-    
+
     // Simplified TEP generation (limited search)
     int max_flips = min(4, n);
     for (int w = 1; w <= max_flips && state->curL < MAX_LIST_SIZE; w++) {
         // Flip w least reliable bits
         for (int i = 0; i < n; i++) state->TEP[i] = 0;
         for (int i = 0; i < w; i++) state->TEP[i] = 1;
-        
+
         // Apply TEP
         for (int i = 0; i < n; i++) {
             state->c[state->perm[i]] = state->cHD[state->perm[i]] ^ state->TEP[i];
         }
-        
+
         state->T++;
-        
+
         if (parity_check_cuda(state->c, n, n-k)) {
             for (int i = 0; i < n; i++) {
                 state->chat_list[state->curL * n + i] = state->c[i];
@@ -120,7 +120,7 @@ __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
             state->curL++;
         }
     }
-    
+
     // Compute APP (simplified)
     if (state->curL == 0) {
         for (int i = 0; i < n; i++) {
@@ -134,10 +134,10 @@ __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
             pp1[i] = 1.0 / (1.0 + exp(llr[i]));
             pp0[i] = 1.0 - pp1[i];
         }
-        
+
         double p0[31] = {0}, p1[31] = {0};
         double weight = 1.0 / state->curL;
-        
+
         for (int l = 0; l < state->curL; l++) {
             for (int i = 0; i < n; i++) {
                 if (state->chat_list[l * n + i] == 1) {
@@ -147,7 +147,7 @@ __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
                 }
             }
         }
-        
+
         for (int i = 0; i < n; i++) {
             p0[i] = p0[i] * 0.9 + pp0[i] * 0.1;
             p1[i] = p1[i] * 0.9 + pp1[i] * 0.1;
@@ -157,33 +157,30 @@ __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
     }
 }
 
-// FIXED: Kernel for row decoding with reduced shared memory usage
+// Kernel for row decoding with reduced shared memory usage
 __global__ void decode_rows_kernel(double* L_channel, double* L_APP, double* L_E,
                                    double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.y;
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (block_id >= num_blocks || row >= n) return;
-    
-    // FIXED: Reduced from 32 to 8 states to fit shared memory limit
-    // SOGRANDState is ~1885 bytes, so 8 * 1885 = ~15KB < 48KB limit
+
     __shared__ SOGRANDState states[8];
-    
+
     int offset = block_id * n * n;
-    // Multiple threads share states using modulo - this is safe for SOGRAND
     SOGRANDState* state = &states[threadIdx.x % 8];
-    
+
     // Prepare input
     double input[31];
     for (int col = 0; col < n; col++) {
         int idx = offset + row * n + col;
         input[col] = L_channel[idx] + alpha * L_E[idx];
     }
-    
+
     // Run SOGRAND
     double L_APP_row[31], L_E_row[31];
     sogrand_siso_cuda(L_APP_row, L_E_row, input, n, k, state);
-    
+
     // Write results
     for (int col = 0; col < n; col++) {
         int idx = offset + row * n + col;
@@ -192,31 +189,30 @@ __global__ void decode_rows_kernel(double* L_channel, double* L_APP, double* L_E
     }
 }
 
-// FIXED: Kernel for column decoding with reduced shared memory usage
+// Kernel for column decoding with reduced shared memory usage
 __global__ void decode_columns_kernel(double* L_channel, double* L_APP, double* L_E,
                                      double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (block_id >= num_blocks || col >= n) return;
-    
-    // FIXED: Reduced shared memory usage
+
     __shared__ SOGRANDState states[8];
-    
+
     int offset = block_id * n * n;
     SOGRANDState* state = &states[threadIdx.x % 8];
-    
+
     // Prepare input
     double input[31];
     for (int row = 0; row < n; row++) {
         int idx = offset + row * n + col;
         input[row] = L_channel[idx] + alpha * L_E[idx];
     }
-    
+
     // Run SOGRAND
     double L_APP_col[31], L_E_col[31];
     sogrand_siso_cuda(L_APP_col, L_E_col, input, n, k, state);
-    
+
     // Write results
     for (int row = 0; row < n; row++) {
         int idx = offset + row * n + col;
@@ -225,74 +221,45 @@ __global__ void decode_columns_kernel(double* L_channel, double* L_APP, double* 
     }
 }
 
-// Kernel for early termination check
-__global__ void early_termination_kernel(double* L_APP, bool* converged, 
-                                        int n, int k, int num_blocks) {
-    int block_id = blockIdx.x;
-    if (block_id >= num_blocks) return;
-    
-    int offset = block_id * n * n;
-    __shared__ bool block_converged;
-    
-    if (threadIdx.x == 0) {
-        block_converged = true;
-        
-        // Get hard decision - removed unused variable c_HD
-        // Simplified convergence check for now
-        
-        converged[block_id] = block_converged;
-    }
-}
-
 // Host function for square decoding
 void decode_square_cuda(double* h_llr_buffer, int* h_bit_buffer, int num_blocks,
                        int n, int k, int Imax, double* alpha) {
     size_t matrix_size = n * n * sizeof(double);
-    
+
     // Allocate device memory
     double *d_L_channel, *d_L_APP, *d_L_E;
-    bool* d_converged;
-    
+
     CHECK_CUDA(cudaMalloc(&d_L_channel, num_blocks * matrix_size));
     CHECK_CUDA(cudaMalloc(&d_L_APP, num_blocks * matrix_size));
     CHECK_CUDA(cudaMalloc(&d_L_E, num_blocks * matrix_size));
-    CHECK_CUDA(cudaMalloc(&d_converged, num_blocks * sizeof(bool)));
-    
+
     // Copy input to device
-    CHECK_CUDA(cudaMemcpy(d_L_channel, h_llr_buffer, num_blocks * matrix_size, 
+    CHECK_CUDA(cudaMemcpy(d_L_channel, h_llr_buffer, num_blocks * matrix_size,
                           cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemset(d_L_E, 0, num_blocks * matrix_size));
-    
+
     // Setup grid dimensions
     dim3 threadsPerBlock(32);
     dim3 blocksPerGrid((n + threadsPerBlock.x - 1) / threadsPerBlock.x, num_blocks);
-    
+
     // Iterative decoding
     for (int iter = 0; iter < Imax; iter++) {
         // Decode rows
         decode_rows_kernel<<<blocksPerGrid, threadsPerBlock>>>(
             d_L_channel, d_L_APP, d_L_E, alpha[2*iter], n, k, num_blocks);
         CHECK_CUDA(cudaDeviceSynchronize());
-        
-        // Check early termination
-        early_termination_kernel<<<num_blocks, 1>>>(
-            d_L_APP, d_converged, n, k, num_blocks);
-        
+
         // Decode columns
         decode_columns_kernel<<<blocksPerGrid, threadsPerBlock>>>(
             d_L_channel, d_L_APP, d_L_E, alpha[2*iter+1], n, k, num_blocks);
         CHECK_CUDA(cudaDeviceSynchronize());
-        
-        // Check early termination
-        early_termination_kernel<<<num_blocks, 1>>>(
-            d_L_APP, d_converged, n, k, num_blocks);
     }
-    
-    // Extract message bits (simplified - just copy L_APP back)
+
+    // Extract message bits
     double* h_L_APP = (double*)malloc(num_blocks * matrix_size);
-    CHECK_CUDA(cudaMemcpy(h_L_APP, d_L_APP, num_blocks * matrix_size, 
+    CHECK_CUDA(cudaMemcpy(h_L_APP, d_L_APP, num_blocks * matrix_size,
                           cudaMemcpyDeviceToHost));
-    
+
     // Hard decision to get bits
     for (int b = 0; b < num_blocks; b++) {
         for (int i = 0; i < k; i++) {
@@ -303,33 +270,89 @@ void decode_square_cuda(double* h_llr_buffer, int* h_bit_buffer, int num_blocks,
             }
         }
     }
-    
+
     free(h_L_APP);
     CHECK_CUDA(cudaFree(d_L_channel));
     CHECK_CUDA(cudaFree(d_L_APP));
     CHECK_CUDA(cudaFree(d_L_E));
-    CHECK_CUDA(cudaFree(d_converged));
 }
 
-// Matrix initialization function (placeholder - needs proper implementation)
+// CRC polynomial conversion
+int* koopman2matlab(const char* k_poly, int* poly_len) {
+    long long dec_val = strtoll(k_poly, NULL, 16);
+    int len = (dec_val > 0) ? floor(log2(dec_val)) + 1 : 1;
+    *poly_len = len + 1;
+    int* poly = (int*)malloc(sizeof(int) * (*poly_len));
+    for (int i = 0; i < len; i++) {
+        poly[i] = (dec_val >> (len - 1 - i)) & 1;
+    }
+    poly[len] = 1;
+    return poly;
+}
+
+// Proper matrix initialization for square code (copied from encoder)
 void init_matrices_square(int* G_flat, int* H_flat, int n, int k) {
-    // Simplified matrix initialization
-    // In a real implementation, you'd call getGH_sys_CRC or similar
+    const char* hex_poly = NULL;
+    int r = n - k;
+
+    if (r == 3) hex_poly = "0x5";
+    else if (r == 4) hex_poly = "0x9";
+    else if (r == 5 && k <= 10) hex_poly = "0x15";
+    else if (r == 5 && k <= 26) hex_poly = "0x12";
+    else if (r == 6 && k <= 25) hex_poly = "0x23";
+    else if (r == 6 && k <= 57) hex_poly = "0x33";
+    else {
+        fprintf(stderr, "Error: (n, k) = (%d, %d) is not supported.\n", n, k);
+        exit(1);
+    }
+
+    int poly_len;
+    int* poly = koopman2matlab(hex_poly, &poly_len);
+
+    // Generate parity matrix P
+    int** P = (int**)malloc(k * sizeof(int*));
+    for(int i = 0; i < k; i++) P[i] = (int*)malloc(r * sizeof(int));
+    int* msg_poly = (int*)calloc(k + r, sizeof(int));
+
+    for (int i = 0; i < k; i++) {
+        memset(msg_poly, 0, (k + r) * sizeof(int));
+        msg_poly[i] = 1;
+
+        for (int j = 0; j < k; j++) {
+            if (msg_poly[j] == 1) {
+                for (int l = 0; l < poly_len; l++) {
+                    msg_poly[j + l] ^= poly[l];
+                }
+            }
+        }
+        for (int j = 0; j < r; j++) P[i][j] = msg_poly[k + j];
+    }
+
+    // Build generator matrix G = [I_k | P]
     for (int i = 0; i < k; i++) {
         for (int j = 0; j < k; j++) {
-            G_flat[i * n + j] = (i == j) ? 1 : 0;  // Identity part
+            G_flat[i * n + j] = (i == j) ? 1 : 0;
         }
-        for (int j = k; j < n; j++) {
-            G_flat[i * n + j] = 0;  // Parity part (placeholder)
-        }
-    }
-    
-    // H matrix (placeholder)
-    for (int i = 0; i < (n-k); i++) {
-        for (int j = 0; j < n; j++) {
-            H_flat[i * n + j] = 0;  // Placeholder
+        for (int j = 0; j < r; j++) {
+            G_flat[i * n + k + j] = P[i][j];
         }
     }
+
+    // Build parity check matrix H = [P^T | I_r]
+    for (int i = 0; i < r; i++) {
+        for (int j = 0; j < k; j++) {
+            H_flat[i * n + j] = P[j][i];
+        }
+        for (int j = 0; j < r; j++) {
+            H_flat[i * n + k + j] = (i == j) ? 1 : 0;
+        }
+    }
+
+    // Cleanup
+    free(poly);
+    free(msg_poly);
+    for(int i = 0; i < k; i++) free(P[i]);
+    free(P);
 }
 
 int main(int argc, char *argv[]) {
@@ -346,15 +369,15 @@ int main(int argc, char *argv[]) {
     const int codeword_block_size = n * n;
     const int message_block_size = k * k;
     const int Imax = 20;
-    
+
     // Initialize alpha array
     double alpha[50];
     for(int i = 0; i < 50; i++) alpha[i] = 0.5;
-    
+
     // Setup generator and parity check matrices
     int h_G[25*31], h_H[6*31];
     init_matrices_square(h_G, h_H, n, k);
-    
+
     // Copy matrices to constant memory
     CHECK_CUDA(cudaMemcpyToSymbol(d_G, h_G, sizeof(h_G)));
     CHECK_CUDA(cudaMemcpyToSymbol(d_H, h_H, sizeof(h_H)));
@@ -367,32 +390,32 @@ int main(int argc, char *argv[]) {
     printf("CUDA Square Decoder (n=%d, k=%d)...\n", n, k);
 
     // Process multiple blocks at once for better GPU utilization
-    const int BATCH_SIZE = 32;  // Process 32 blocks at a time
+    const int BATCH_SIZE = 32;
     double* llr_batch = (double*)malloc(BATCH_SIZE * codeword_block_size * sizeof(double));
     int* bit_batch = (int*)malloc(BATCH_SIZE * message_block_size * sizeof(int));
-    
+
     int total_blocks = 0;
-    
+
     while (true) {
         // Read batch of blocks
         int blocks_read = 0;
         for (int i = 0; i < BATCH_SIZE; i++) {
-            size_t read = fread(&llr_batch[i * codeword_block_size], 
+            size_t read = fread(&llr_batch[i * codeword_block_size],
                                sizeof(double), codeword_block_size, fin);
             if (read != codeword_block_size) break;
             blocks_read++;
         }
-        
+
         if (blocks_read == 0) break;
-        
+
         // Decode batch on GPU
         decode_square_cuda(llr_batch, bit_batch, blocks_read, n, k, Imax, alpha);
-        
+
         // Convert bits to bytes and write
         for (int b = 0; b < blocks_read; b++) {
             unsigned char byte_out = 0;
             int bit_count_out = 0;
-            
+
             for (int i = 0; i < message_block_size; i++) {
                 byte_out = (byte_out << 1) | bit_batch[b * message_block_size + i];
                 bit_count_out++;
@@ -402,13 +425,13 @@ int main(int argc, char *argv[]) {
                     bit_count_out = 0;
                 }
             }
-            
+
             if (bit_count_out > 0) {
                 byte_out <<= (8 - bit_count_out);
                 fwrite(&byte_out, 1, 1, fout);
             }
         }
-        
+
         total_blocks += blocks_read;
     }
 

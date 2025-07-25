@@ -20,7 +20,7 @@
 __constant__ int d_G[10*15];  // Generator matrix
 __constant__ int d_H[5*15];   // Parity check matrix
 
-// FIXED: 3D tensor access helpers - both host and device versions
+// 3D tensor access helpers - both host and device versions
 __host__ __device__ inline int tensor_idx(int i, int j, int k, int n) {
     return k * n * n + j * n + i;
 }
@@ -40,7 +40,7 @@ struct SOGRANDState15 {
 };
 
 // Simplified SOGRAND for cubic code
-__device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr, 
+__device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
                                      int n, int k, SOGRANDState15* state) {
     // Hard decision
     for (int i = 0; i < n; i++) {
@@ -48,7 +48,7 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
         state->absL[i] = fabs(llr[i]);
         state->perm[i] = i;
     }
-    
+
     // Simple bubble sort for reliability ordering
     for (int i = 0; i < n-1; i++) {
         for (int j = 0; j < n-i-1; j++) {
@@ -62,14 +62,14 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
             }
         }
     }
-    
+
     // Initialize
     for (int i = 0; i < n; i++) {
         state->c[i] = state->cHD[i];
     }
     state->curL = 0;
     state->T = 1;
-    
+
     // Check hard decision
     bool valid = true;
     for (int j = 0; j < (n-k); j++) {
@@ -77,33 +77,33 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
         for (int i = 0; i < n; i++) {
             syndrome ^= (state->c[i] * d_H[j*n + i]);
         }
-        if (syndrome == 1) {
+        if (syndrome != 0) {
             valid = false;
             break;
         }
     }
-    
+
     if (valid) {
         for (int i = 0; i < n; i++) {
             state->chat_list[i] = state->c[i];
         }
         state->curL = 1;
     }
-    
+
     // Limited TEP search
-    int max_flips = min(3, n);
+    int max_flips = min(4, n);  // Increased from 3 to 4 for better performance
     for (int w = 1; w <= max_flips && state->curL < MAX_LIST_SIZE; w++) {
         // Flip w least reliable bits
         for (int i = 0; i < n; i++) state->TEP[i] = 0;
         for (int i = 0; i < w; i++) state->TEP[i] = 1;
-        
+
         // Apply TEP
         for (int i = 0; i < n; i++) {
             state->c[state->perm[i]] = state->cHD[state->perm[i]] ^ state->TEP[i];
         }
-        
+
         state->T++;
-        
+
         // Check validity
         valid = true;
         for (int j = 0; j < (n-k); j++) {
@@ -111,12 +111,12 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
             for (int i = 0; i < n; i++) {
                 syndrome ^= (state->c[i] * d_H[j*n + i]);
             }
-            if (syndrome == 1) {
+            if (syndrome != 0) {
                 valid = false;
                 break;
             }
         }
-        
+
         if (valid) {
             for (int i = 0; i < n; i++) {
                 state->chat_list[state->curL * n + i] = state->c[i];
@@ -124,9 +124,10 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
             state->curL++;
         }
     }
-    
+
     // Compute APP
     if (state->curL == 0) {
+        // No valid codewords found, use channel LLRs
         for (int i = 0; i < n; i++) {
             L_APP[i] = llr[i];
             L_E[i] = 0;
@@ -137,10 +138,10 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
             pp1[i] = 1.0 / (1.0 + exp(llr[i]));
             pp0[i] = 1.0 - pp1[i];
         }
-        
+
         double p0[15] = {0}, p1[15] = {0};
         double weight = 1.0 / state->curL;
-        
+
         for (int l = 0; l < state->curL; l++) {
             for (int i = 0; i < n; i++) {
                 if (state->chat_list[l * n + i] == 1) {
@@ -150,42 +151,42 @@ __device__ void sogrand_siso_cuda_15(double* L_APP, double* L_E, double* llr,
                 }
             }
         }
-        
+
+        // Mix with channel probabilities
         for (int i = 0; i < n; i++) {
-            p0[i] = p0[i] * 0.9 + pp0[i] * 0.1;
-            p1[i] = p1[i] * 0.9 + pp1[i] * 0.1;
+            p0[i] = p0[i] * 0.8 + pp0[i] * 0.2;  // Adjusted mixing ratio
+            p1[i] = p1[i] * 0.8 + pp1[i] * 0.2;
             L_APP[i] = log(fmax(p0[i], 1e-30)) - log(fmax(p1[i], 1e-30));
             L_E[i] = L_APP[i] - llr[i];
         }
     }
 }
 
-// FIXED: Kernel for column decoding with reduced shared memory
+// Kernel for column decoding with reduced shared memory
 __global__ void decode_columns_cubic_kernel(double* L_channel, double* L_APP, double* L_E,
                                            double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.z;
     int slice = blockIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (block_id >= num_blocks || slice >= n || col >= n) return;
-    
-    // FIXED: Reduced shared memory usage
-    __shared__ SOGRANDState15 states[4];  // Reduced from 16 to 4
+
+    __shared__ SOGRANDState15 states[4];
     SOGRANDState15* state = &states[threadIdx.x % 4];
-    
+
     int offset = block_id * n * n * n;
-    
+
     // Prepare input for this column
     double input[15];
     for (int row = 0; row < n; row++) {
         int idx = offset + tensor_idx(row, col, slice, n);
         input[row] = L_channel[idx] + alpha * L_E[idx];
     }
-    
+
     // Run SOGRAND
     double L_APP_vec[15], L_E_vec[15];
     sogrand_siso_cuda_15(L_APP_vec, L_E_vec, input, n, k, state);
-    
+
     // Write results
     for (int row = 0; row < n; row++) {
         int idx = offset + tensor_idx(row, col, slice, n);
@@ -194,32 +195,31 @@ __global__ void decode_columns_cubic_kernel(double* L_channel, double* L_APP, do
     }
 }
 
-// FIXED: Kernel for row decoding with reduced shared memory
+// Kernel for row decoding with reduced shared memory
 __global__ void decode_rows_cubic_kernel(double* L_channel, double* L_APP, double* L_E,
                                          double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.z;
     int slice = blockIdx.y;
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (block_id >= num_blocks || slice >= n || row >= n) return;
-    
-    // FIXED: Reduced shared memory usage
-    __shared__ SOGRANDState15 states[4];  // Reduced from 16 to 4
+
+    __shared__ SOGRANDState15 states[4];
     SOGRANDState15* state = &states[threadIdx.x % 4];
-    
+
     int offset = block_id * n * n * n;
-    
+
     // Prepare input for this row
     double input[15];
     for (int col = 0; col < n; col++) {
         int idx = offset + tensor_idx(row, col, slice, n);
         input[col] = L_channel[idx] + alpha * L_E[idx];
     }
-    
+
     // Run SOGRAND
     double L_APP_vec[15], L_E_vec[15];
     sogrand_siso_cuda_15(L_APP_vec, L_E_vec, input, n, k, state);
-    
+
     // Write results
     for (int col = 0; col < n; col++) {
         int idx = offset + tensor_idx(row, col, slice, n);
@@ -228,32 +228,31 @@ __global__ void decode_rows_cubic_kernel(double* L_channel, double* L_APP, doubl
     }
 }
 
-// FIXED: Kernel for slice decoding with reduced shared memory
+// Kernel for slice decoding with reduced shared memory
 __global__ void decode_slices_cubic_kernel(double* L_channel, double* L_APP, double* L_E,
                                           double alpha, int n, int k, int num_blocks) {
     int block_id = blockIdx.z;
     int row = blockIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (block_id >= num_blocks || row >= n || col >= n) return;
-    
-    // FIXED: Reduced shared memory usage
-    __shared__ SOGRANDState15 states[4];  // Reduced from 16 to 4
+
+    __shared__ SOGRANDState15 states[4];
     SOGRANDState15* state = &states[threadIdx.x % 4];
-    
+
     int offset = block_id * n * n * n;
-    
+
     // Prepare input for this slice vector
     double input[15];
     for (int slice = 0; slice < n; slice++) {
         int idx = offset + tensor_idx(row, col, slice, n);
         input[slice] = L_channel[idx] + alpha * L_E[idx];
     }
-    
+
     // Run SOGRAND
     double L_APP_vec[15], L_E_vec[15];
     sogrand_siso_cuda_15(L_APP_vec, L_E_vec, input, n, k, state);
-    
+
     // Write results
     for (int slice = 0; slice < n; slice++) {
         int idx = offset + tensor_idx(row, col, slice, n);
@@ -262,61 +261,115 @@ __global__ void decode_slices_cubic_kernel(double* L_channel, double* L_APP, dou
     }
 }
 
+// Proper matrix initialization for (15,10) CRC code
+void init_matrices_cubic(int* G_flat, int* H_flat) {
+    const int n = 15;
+    const int k = 10;
+    const int m = n - k; // 5
+
+    // CRC polynomial: 0x15 = 10101 in binary = x^4 + x^2 + 1
+    const int crc_poly = 0x15;
+
+    // First, create the parity matrix P (k x m)
+    int P[10][5];
+
+    // For systematic CRC code, each row of P is computed by dividing x^(m+i) by g(x)
+    for (int i = 0; i < k; i++) {
+        // Start with x^(m+i) = x^(5+i)
+        unsigned int dividend = 1 << (m + k - 1 - i);
+
+        // Perform polynomial division
+        for (int j = 0; j < k; j++) {
+            if (dividend & (1 << (n - 1 - j))) {
+                dividend ^= (crc_poly << (n - m - 1 - j));
+            }
+        }
+
+        // The remainder gives us the parity bits for this row
+        for (int j = 0; j < m; j++) {
+            P[i][j] = (dividend >> (m - 1 - j)) & 1;
+        }
+    }
+
+    // Construct generator matrix G = [I_k | P]
+    for (int i = 0; i < k; i++) {
+        for (int j = 0; j < n; j++) {
+            if (j < k) {
+                // Identity part
+                G_flat[i * n + j] = (i == j) ? 1 : 0;
+            } else {
+                // Parity part
+                G_flat[i * n + j] = P[i][j - k];
+            }
+        }
+    }
+
+    // Construct parity check matrix H = [P^T | I_m]
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            if (j < k) {
+                // P transpose part
+                H_flat[i * n + j] = P[j][i];
+            } else {
+                // Identity part
+                H_flat[i * n + j] = ((j - k) == i) ? 1 : 0;
+            }
+        }
+    }
+}
+
 // Host function for cubic decoding
 void decode_cubic_cuda(double* h_llr_buffer, int* h_bit_buffer, int num_blocks,
                       int n, int k, int Imax, double* alpha) {
     size_t tensor_size = n * n * n * sizeof(double);
-    
+
     // Allocate device memory
     double *d_L_channel, *d_L_APP, *d_L_E;
-    
+
     CHECK_CUDA(cudaMalloc(&d_L_channel, num_blocks * tensor_size));
     CHECK_CUDA(cudaMalloc(&d_L_APP, num_blocks * tensor_size));
     CHECK_CUDA(cudaMalloc(&d_L_E, num_blocks * tensor_size));
-    
+
     // Copy input to device
-    CHECK_CUDA(cudaMemcpy(d_L_channel, h_llr_buffer, num_blocks * tensor_size, 
+    CHECK_CUDA(cudaMemcpy(d_L_channel, h_llr_buffer, num_blocks * tensor_size,
                           cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemset(d_L_E, 0, num_blocks * tensor_size));
-    
+
     // Setup grid dimensions
     dim3 threadsPerBlock(16);
     dim3 blocksColumns((n + threadsPerBlock.x - 1) / threadsPerBlock.x, n, num_blocks);
     dim3 blocksRows((n + threadsPerBlock.x - 1) / threadsPerBlock.x, n, num_blocks);
     dim3 blocksSlices((n + threadsPerBlock.x - 1) / threadsPerBlock.x, n, num_blocks);
-    
+
     // Iterative decoding
     for (int iter = 0; iter < Imax; iter++) {
         // Stage 1: Decode columns
         decode_columns_cubic_kernel<<<blocksColumns, threadsPerBlock>>>(
             d_L_channel, d_L_APP, d_L_E, alpha[2*iter], n, k, num_blocks);
         CHECK_CUDA(cudaDeviceSynchronize());
-        
+
         // Stage 2: Decode rows
         decode_rows_cubic_kernel<<<blocksRows, threadsPerBlock>>>(
             d_L_channel, d_L_APP, d_L_E, alpha[2*iter+1], n, k, num_blocks);
         CHECK_CUDA(cudaDeviceSynchronize());
-        
+
         // Stage 3: Decode slices
         decode_slices_cubic_kernel<<<blocksSlices, threadsPerBlock>>>(
             d_L_channel, d_L_APP, d_L_E, alpha[2*iter+1], n, k, num_blocks);
         CHECK_CUDA(cudaDeviceSynchronize());
-        
-        // Early termination could be checked here
     }
-    
+
     // Extract message bits
     double* h_L_APP = (double*)malloc(num_blocks * tensor_size);
-    CHECK_CUDA(cudaMemcpy(h_L_APP, d_L_APP, num_blocks * tensor_size, 
+    CHECK_CUDA(cudaMemcpy(h_L_APP, d_L_APP, num_blocks * tensor_size,
                           cudaMemcpyDeviceToHost));
-    
-    // FIXED: Hard decision to get bits from [0:k, 0:k, 0:k] - now works on host
+
+    // Hard decision to get bits from [0:k, 0:k, 0:k]
     for (int b = 0; b < num_blocks; b++) {
         int bit_idx = 0;
         for (int slice = 0; slice < k; slice++) {
             for (int row = 0; row < k; row++) {
                 for (int col = 0; col < k; col++) {
-                    // This now works because tensor_idx is __host__ __device__
                     int llr_idx = b * n * n * n + tensor_idx(row, col, slice, n);
                     h_bit_buffer[b * k * k * k + bit_idx] = (h_L_APP[llr_idx] > 0) ? 0 : 1;
                     bit_idx++;
@@ -324,34 +377,11 @@ void decode_cubic_cuda(double* h_llr_buffer, int* h_bit_buffer, int num_blocks,
             }
         }
     }
-    
+
     free(h_L_APP);
     CHECK_CUDA(cudaFree(d_L_channel));
     CHECK_CUDA(cudaFree(d_L_APP));
     CHECK_CUDA(cudaFree(d_L_E));
-}
-
-// Matrix initialization (simplified version of getGH_sys_CRC)
-void init_matrices_cubic(int* G_flat, int* H_flat) {
-    // Initialize with CRC polynomial 0x15 for (15,10) code
-    // This is a simplified version - full implementation would compute properly
-    // For now, just create identity part
-    for (int i = 0; i < 10; i++) {
-        for (int j = 0; j < 10; j++) {
-            G_flat[i * 15 + j] = (i == j) ? 1 : 0;
-        }
-        // Parity part would be computed from CRC polynomial
-        for (int j = 10; j < 15; j++) {
-            G_flat[i * 15 + j] = 0; // Placeholder
-        }
-    }
-    
-    // H matrix (simplified)
-    for (int i = 0; i < 5; i++) {
-        for (int j = 0; j < 15; j++) {
-            H_flat[i * 15 + j] = 0; // Placeholder
-        }
-    }
 }
 
 int main(int argc, char *argv[]) {
@@ -368,15 +398,15 @@ int main(int argc, char *argv[]) {
     const int codeword_block_size = n * n * n;
     const int message_block_size = k * k * k;
     const int Imax = 30;
-    
-    // Initialize alpha array
+
+    // Initialize alpha array (damping factors)
     double alpha[100];
     for(int i = 0; i < 100; i++) alpha[i] = 0.7;
-    
+
     // Setup matrices
     int h_G[10*15], h_H[5*15];
     init_matrices_cubic(h_G, h_H);
-    
+
     // Copy to constant memory
     CHECK_CUDA(cudaMemcpyToSymbol(d_G, h_G, sizeof(h_G)));
     CHECK_CUDA(cudaMemcpyToSymbol(d_H, h_H, sizeof(h_H)));
@@ -389,32 +419,32 @@ int main(int argc, char *argv[]) {
     printf("CUDA Cubic Decoder (n=%d, k=%d)...\n", n, k);
 
     // Process in batches
-    const int BATCH_SIZE = 16;  // Smaller batch due to larger block size
+    const int BATCH_SIZE = 16;
     double* llr_batch = (double*)malloc(BATCH_SIZE * codeword_block_size * sizeof(double));
     int* bit_batch = (int*)malloc(BATCH_SIZE * message_block_size * sizeof(int));
-    
+
     int total_blocks = 0;
-    
+
     while (true) {
         // Read batch
         int blocks_read = 0;
         for (int i = 0; i < BATCH_SIZE; i++) {
-            size_t read = fread(&llr_batch[i * codeword_block_size], 
+            size_t read = fread(&llr_batch[i * codeword_block_size],
                                sizeof(double), codeword_block_size, fin);
             if (read != codeword_block_size) break;
             blocks_read++;
         }
-        
+
         if (blocks_read == 0) break;
-        
+
         // Decode batch on GPU
         decode_cubic_cuda(llr_batch, bit_batch, blocks_read, n, k, Imax, alpha);
-        
+
         // Convert bits to bytes and write
         for (int b = 0; b < blocks_read; b++) {
             unsigned char byte_out = 0;
             int bit_count_out = 0;
-            
+
             for (int i = 0; i < message_block_size; i++) {
                 byte_out = (byte_out << 1) | bit_batch[b * message_block_size + i];
                 bit_count_out++;
@@ -424,13 +454,13 @@ int main(int argc, char *argv[]) {
                     bit_count_out = 0;
                 }
             }
-            
+
             if (bit_count_out > 0) {
                 byte_out <<= (8 - bit_count_out);
                 fwrite(&byte_out, 1, 1, fout);
             }
         }
-        
+
         total_blocks += blocks_read;
     }
 

@@ -45,31 +45,122 @@ __device__ void hard_decision_cuda(double* llr, uint8_t* c, int n) {
     }
 }
 
-// CUDA kernel for parity check
+// CUDA kernel for parity check - FIXED: matches C implementation
 __device__ bool parity_check_cuda(uint8_t* c, int n, int s) {
     for (int j = 0; j < s; j++) {
         uint8_t syndrome = 0;
         for (int i = 0; i < n; i++) {
             syndrome ^= (c[i] * d_H[j*n + i]);
         }
-        if (syndrome != 0) return false;  // Fixed: should be != 0, not == 1
+        if (syndrome == 1) return false;  // Fixed: matches C code logic
     }
     return true;
 }
 
-// Simplified SOGRAND kernel for a single row/column
+// CUDA kernel for parity calculation
+__device__ int parity_cuda(uint8_t array[], int n) {
+    int sum = 0;
+    for (int i = 0; i < n; i++) sum += array[i];
+    return sum % 2;
+}
+
+// CUDA kernel for JacLog function
+__device__ double JacLog_cuda(double x) {
+    if (x > 50) return x;
+    if (x < -50) return 0.0;
+    return log(1.0 + exp(x));
+}
+
+// CUDA kernel for probability parity calculation
+__device__ double prob_parity_cuda(int parity_cHD, double *absL, int n) {
+    double prob_even = 1.0;
+    for (int i = 0; i < n; i++) {
+        prob_even *= (1.0 - 2.0 * exp(-absL[i]) / (1.0 + exp(-absL[i])));
+    }
+    prob_even = 0.5 * (1.0 + prob_even);
+    return (parity_cHD == 0) ? prob_even : 1.0 - prob_even;
+}
+
+// CUDA kernel for AddTEP function
+__device__ void AddTEP_cuda(uint8_t *c, uint8_t *cHD, uint8_t *TEP, int *perm, int n) {
+    for (int i = 0; i < n; i++) c[perm[i]] = cHD[perm[i]] ^ TEP[i];
+}
+
+// CUDA kernel for getPM_HD function
+__device__ double getPM_HD_cuda(double *absL, int n) {
+    double pm = 0;
+    for(int i = 0; i < n; i++) pm += JacLog_cuda(-absL[i]);
+    return pm;
+}
+
+// CUDA kernel for getPM function
+__device__ double getPM_cuda(uint8_t *TEP, double *absL, double PM_HD, int n) {
+    double pm = PM_HD;
+    for(int i = 0; i < n; i++) {
+        if (TEP[i] == 1) pm += (JacLog_cuda(absL[i]) - JacLog_cuda(-absL[i]));
+    }
+    return pm;
+}
+
+// CUDA kernel for getLConf function
+__device__ double getLConf_cuda(double *pNL, double P_notGuess, int cur_L, double *score, int s, int even) {
+    double P_positive = 0.0;
+    for(int i = 0; i < cur_L; i++) P_positive += exp(-score[4*i+1]);
+
+    if(even == 1) s--;
+
+    double P_negative = pow(2.0, -(double)s) * P_notGuess;
+    pNL[0] = P_negative;
+    return (P_positive + P_negative > 1e-9) ? (P_positive / (P_positive + P_negative)) : 1.0;
+}
+
+// CUDA kernel for mountain_build function
+__device__ void mountain_build_cuda(int *u, int k, int w, int W1, int n1) {
+    for(int i = k + 1; i < w; i++) u[i] = u[k];
+    long long W2 = W1;
+    for(int i = 0; i < w; i++) W2 -= u[i];
+
+    if (n1 - u[k] == 0) return;
+
+    unsigned long long q = (W2 >= 0) ? (unsigned long long)floor((double)W2 / (n1 - u[k])) : 0;
+    unsigned long long r = W2 - q * (n1 - u[k]);
+    if (q > 0 && w > q) {
+        for(int i = w - q; i < w; i++) u[i] = n1;
+    }
+    if (w > q) u[w - q - 1] += r;
+}
+
+// CUDA kernel for getAPP function
+__device__ void getAPP_cuda(int cur_L, double *score, double *APP) {
+    if (cur_L == 0) return;
+    double P_positive = 0.0;
+    for(int i = 0; i < cur_L; i++) P_positive += exp(-score[4*i+1]);
+    if (P_positive < 1e-30) return;
+    double denominator = score[4*(cur_L-1)+3] / P_positive;
+    for(int i = 0; i < cur_L; i++) APP[i] = exp(-score[4*i+1]) * denominator;
+}
+
+// CUDA kernel for findMax function
+__device__ int findMax_cuda(int a, int b) { 
+    return !(b > a) ? a : b; 
+}
+
+// Improved SOGRAND kernel with proper algorithm implementation
 __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
-                                  int n, int k, SOGRANDState* state) {
+                                  int n, int k, SOGRANDState* state, int even, double thres) {
     // Initialize
     hard_decision_cuda(llr, state->cHD, n);
+    int parity_cHD = parity_cuda(state->cHD, n);
+    state->pNL = 0.0;
 
-    // Sort by reliability (simplified - using bubble sort for now)
+    // Calculate absolute LLRs and initialize permutation
     for (int i = 0; i < n; i++) {
         state->absL[i] = fabs(llr[i]);
         state->perm[i] = i;
+        state->TEP[i] = 0;
     }
 
-    // Simple bubble sort (can be optimized with parallel sorting)
+    // Simple bubble sort for reliability ordering (can be optimized)
     for (int i = 0; i < n-1; i++) {
         for (int j = 0; j < n-i-1; j++) {
             if (state->absL[j] > state->absL[j+1]) {
@@ -83,75 +174,125 @@ __device__ void sogrand_siso_cuda(double* L_APP, double* L_E, double* llr,
         }
     }
 
-    // Copy hard decision
+    // Initialize state
     for (int i = 0; i < n; i++) {
         state->c[i] = state->cHD[i];
     }
-
     state->curL = 0;
     state->T = 1;
 
-    // Check if hard decision is valid
+    // Initialize score array
+    for (int i = 0; i < 4 * MAX_LIST_SIZE; i++) {
+        state->s_list[i] = 0;
+    }
+    for (int i = 0; i < MAX_LIST_SIZE; i++) {
+        state->APP_list[i] = 0;
+    }
+
+    double P_notGuess = 1.0;
+    if (even == 1) {
+        P_notGuess = prob_parity_cuda(parity_cHD, state->absL, n);
+    }
+
+    double PM_HD = getPM_HD_cuda(state->absL, n);
+
+    // Check hard decision first
+    AddTEP_cuda(state->c, state->cHD, state->TEP, state->perm, n);
+    if (parity_cHD == 0 || even == 0) {
+        P_notGuess -= exp(-getPM_cuda(state->TEP, state->absL, PM_HD, n));
+    }
+
     if (parity_check_cuda(state->c, n, n-k)) {
+        state->s_list[1] = getPM_cuda(state->TEP, state->absL, PM_HD, n);
         for (int i = 0; i < n; i++) {
             state->chat_list[i] = state->c[i];
         }
-        state->curL = 1;
+        state->s_list[2] = 1;
+        state->s_list[3] = getLConf_cuda(&state->pNL, P_notGuess, state->curL, state->s_list, n-k, even);
+        state->curL++;
+        
+        if ((state->s_list[3] > thres) || (state->curL == MAX_LIST_SIZE)) {
+            getAPP_cuda(state->curL, state->s_list, state->APP_list);
+            // Compute final L_APP and L_E
+            for (int i = 0; i < n; i++) {
+                double p0 = 0, p1 = 0;
+                for (int l = 0; l < state->curL; l++) {
+                    if (state->chat_list[l * n + i] == 1) {
+                        p1 += state->APP_list[l];
+                    } else {
+                        p0 += state->APP_list[l];
+                    }
+                }
+                L_APP[i] = log(fmax(p0, 1e-30)) - log(fmax(p1, 1e-30));
+                L_E[i] = L_APP[i] - llr[i];
+            }
+            return;
+        }
     }
 
-    // Simplified TEP generation (limited search)
+    // Simplified TEP generation (limited due to GPU constraints)
+    // In a full implementation, this would use the mountain climbing algorithm
     int max_flips = min(4, n);
     for (int w = 1; w <= max_flips && state->curL < MAX_LIST_SIZE; w++) {
-        // Flip w least reliable bits
+        if (even == 1 && (w % 2 != parity_cHD)) continue;
+        
+        // Generate simple TEP patterns
         for (int i = 0; i < n; i++) state->TEP[i] = 0;
         for (int i = 0; i < w; i++) state->TEP[i] = 1;
 
-        // Apply TEP
-        for (int i = 0; i < n; i++) {
-            state->c[state->perm[i]] = state->cHD[state->perm[i]] ^ state->TEP[i];
-        }
-
+        AddTEP_cuda(state->c, state->cHD, state->TEP, state->perm, n);
         state->T++;
+        P_notGuess -= exp(-getPM_cuda(state->TEP, state->absL, PM_HD, n));
 
         if (parity_check_cuda(state->c, n, n-k)) {
+            state->s_list[4*state->curL] = w;
+            state->s_list[4*state->curL+1] = getPM_cuda(state->TEP, state->absL, PM_HD, n);
             for (int i = 0; i < n; i++) {
                 state->chat_list[state->curL * n + i] = state->c[i];
             }
+            state->s_list[4*state->curL+2] = state->T;
+            state->s_list[4*state->curL+3] = getLConf_cuda(&state->pNL, P_notGuess, state->curL, state->s_list, n-k, even);
             state->curL++;
+            
+            if ((state->s_list[4*(state->curL-1)+3] > thres) || (state->curL == MAX_LIST_SIZE)) {
+                getAPP_cuda(state->curL, state->s_list, state->APP_list);
+                // Compute final L_APP and L_E
+                for (int i = 0; i < n; i++) {
+                    double p0 = 0, p1 = 0;
+                    for (int l = 0; l < state->curL; l++) {
+                        if (state->chat_list[l * n + i] == 1) {
+                            p1 += state->APP_list[l];
+                        } else {
+                            p0 += state->APP_list[l];
+                        }
+                    }
+                    L_APP[i] = log(fmax(p0, 1e-30)) - log(fmax(p1, 1e-30));
+                    L_E[i] = L_APP[i] - llr[i];
+                }
+                return;
+            }
         }
     }
 
-    // Compute APP (simplified)
+    // If no valid codewords found, use channel LLRs
     if (state->curL == 0) {
         for (int i = 0; i < n; i++) {
             L_APP[i] = llr[i];
             L_E[i] = 0;
         }
     } else {
-        // Simplified APP computation
-        double pp0[31], pp1[31];
+        getAPP_cuda(state->curL, state->s_list, state->APP_list);
+        // Compute final L_APP and L_E
         for (int i = 0; i < n; i++) {
-            pp1[i] = 1.0 / (1.0 + exp(llr[i]));
-            pp0[i] = 1.0 - pp1[i];
-        }
-
-        double p0[31] = {0}, p1[31] = {0};
-        double weight = 1.0 / state->curL;
-
-        for (int l = 0; l < state->curL; l++) {
-            for (int i = 0; i < n; i++) {
+            double p0 = 0, p1 = 0;
+            for (int l = 0; l < state->curL; l++) {
                 if (state->chat_list[l * n + i] == 1) {
-                    p1[i] += weight;
+                    p1 += state->APP_list[l];
                 } else {
-                    p0[i] += weight;
+                    p0 += state->APP_list[l];
                 }
             }
-        }
-
-        for (int i = 0; i < n; i++) {
-            p0[i] = p0[i] * 0.9 + pp0[i] * 0.1;
-            p1[i] = p1[i] * 0.9 + pp1[i] * 0.1;
-            L_APP[i] = log(fmax(p0[i], 1e-30)) - log(fmax(p1[i], 1e-30));
+            L_APP[i] = log(fmax(p0, 1e-30)) - log(fmax(p1, 1e-30));
             L_E[i] = L_APP[i] - llr[i];
         }
     }
@@ -179,7 +320,7 @@ __global__ void decode_rows_kernel(double* L_channel, double* L_APP, double* L_E
 
     // Run SOGRAND
     double L_APP_row[31], L_E_row[31];
-    sogrand_siso_cuda(L_APP_row, L_E_row, input, n, k, state);
+    sogrand_siso_cuda(L_APP_row, L_E_row, input, n, k, state, 1, 0.999); // even=1, thres=0.999
 
     // Write results
     for (int col = 0; col < n; col++) {
@@ -211,7 +352,7 @@ __global__ void decode_columns_kernel(double* L_channel, double* L_APP, double* 
 
     // Run SOGRAND
     double L_APP_col[31], L_E_col[31];
-    sogrand_siso_cuda(L_APP_col, L_E_col, input, n, k, state);
+    sogrand_siso_cuda(L_APP_col, L_E_col, input, n, k, state, 1, 0.999); // even=1, thres=0.999
 
     // Write results
     for (int row = 0; row < n; row++) {

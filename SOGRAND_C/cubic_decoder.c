@@ -91,7 +91,7 @@ int main(int argc, char *argv[]) {
     const uint64_t Tmax = UINT64_MAX;
     const double p_ET = 1e-5;
     const double thres = 1.0 - p_ET;
-    
+
     // Initialize alpha array with 0.7 for all iterations (matching MATLAB)
     double alpha[100];
     for(int i = 0; i < 100; i++) alpha[i] = 0.7;
@@ -107,11 +107,13 @@ int main(int argc, char *argv[]) {
     int bit_buffer[message_block_size];
     unsigned char byte_out = 0;
     int bit_count_out = 0;
-    
+
     int total_NG = 0;
     int total_NG_p = 0;
     double total_iterations = 0;
     int block_count = 0;
+
+    clock_t start_time = clock();
 
     while (fread(llr_buffer, sizeof(double), codeword_block_size, fin) == codeword_block_size) {
         block_count++;
@@ -135,12 +137,12 @@ int main(int argc, char *argv[]) {
             // Columns
             int NGmax = 0;
             n_iter += 0.5;
-            
+
             // L_A = alpha(2*i-1) * L_E
             for(int idx = 0; idx < codeword_block_size; idx++) {
                 L_A.data[idx] = alpha[2*iter-2] * L_E.data[idx];
             }
-            
+
             // input = L_channel + L_A
             for(int idx = 0; idx < codeword_block_size; idx++) {
                 input.data[idx] = L_channel.data[idx] + L_A.data[idx];
@@ -160,18 +162,18 @@ int main(int argc, char *argv[]) {
                 }
             }
             NG_p += NGmax;
-            
+
             if (early_termination(L_APP, G, n, k)) break;
 
             // Rows
             NGmax = 0;
             n_iter += 0.5;
-            
+
             // L_A = alpha(2*i) * L_E
             for(int idx = 0; idx < codeword_block_size; idx++) {
                 L_A.data[idx] = alpha[2*iter-1] * L_E.data[idx];
             }
-            
+
             // input = L_channel + L_A
             for(int idx = 0; idx < codeword_block_size; idx++) {
                 input.data[idx] = L_channel.data[idx] + L_A.data[idx];
@@ -191,18 +193,18 @@ int main(int argc, char *argv[]) {
                 }
             }
             NG_p += NGmax;
-            
+
             if (early_termination(L_APP, G, n, k)) break;
 
             // Slices
             NGmax = 0;
             n_iter += 0.5;
-            
+
             // L_A = alpha(2*i) * L_E (using same alpha as previous dimension)
             for(int idx = 0; idx < codeword_block_size; idx++) {
                 L_A.data[idx] = alpha[2*iter-1] * L_E.data[idx];
             }
-            
+
             // input = L_channel + L_A
             for(int idx = 0; idx < codeword_block_size; idx++) {
                 input.data[idx] = L_channel.data[idx] + L_A.data[idx];
@@ -222,7 +224,7 @@ int main(int argc, char *argv[]) {
                 }
             }
             NG_p += NGmax;
-            
+
             if (early_termination(L_APP, G, n, k)) break;
         }
 
@@ -257,7 +259,7 @@ int main(int argc, char *argv[]) {
     }
 
     clock_t end_time = clock();
-    double cpu_time_used = ((double) end_time) / CLOCKS_PER_SEC;
+    double cpu_time_used = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
 
     printf("Decoding complete. %d block(s) decoded.\n", block_count);
     printf("Average iterations per block: %.2f\n", total_iterations / block_count);
@@ -265,7 +267,7 @@ int main(int argc, char *argv[]) {
     printf("Average NG per info bit: %.2f\n", (double)total_NG / (block_count * k * k * k));
     printf("Average NG_p per block: %.2f\n", (double)total_NG_p / block_count);
     printf("Total CPU time: %.2f seconds\n", cpu_time_used);
-    
+
     fclose(fin);
     fclose(fout);
     free_int_matrix(G, k);
@@ -357,13 +359,13 @@ void hard_decision(double* llr, int* bits, int length) {
     int k = 10; // hardcoded for now, can be passed as parameter
     int n = 15;
     int bit_idx = 0;
-    
+
     // Ensure we don't exceed the expected length
     int expected_length = k * k * k;
     if (length != expected_length) {
         fprintf(stderr, "Warning: hard_decision length mismatch\n");
     }
-    
+
     for (int slice = 0; slice < k; slice++) {
         for (int row = 0; row < k; row++) {
             for (int col = 0; col < k; col++) {
@@ -543,6 +545,8 @@ void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** 
     free(H_flat);
 }
 
+// Key fixes needed in the sogrand_main_logic function:
+
 void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double* curL_val, double* pNL_val, double* APP_list, double* llr, uint8_t* H_flat, int n, int s, int IC, uint64_t L, uint64_t Tmax, double thres, int even){
     size_t *perm = calloc(n, sizeof(size_t));
     uint8_t *cHD = calloc(n, sizeof(uint8_t));
@@ -554,8 +558,8 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
     int32_t *D   = calloc(n, sizeof(int32_t));
 
     for(size_t i = 0; i < n; i++) perm[i] = i;
-    for(size_t i = 0; i < 4*L; i++) s_list[i] = 0; // Initialize s_list
-    for(size_t i = 0; i < L; i++) APP_list[i] = 0; // Initialize APP_list
+    for(size_t i = 0; i < 4*L; i++) s_list[i] = 0;
+    for(size_t i = 0; i < L; i++) APP_list[i] = 0;
 
     uint64_t cur_L = 0;
     HardDec(cHD, llr, n);
@@ -586,18 +590,22 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
 
     AddTEP(c, cHD, TEP, perm, n);
     T_val[0] = 1;
-    if (parity_cHD==0 || even==0) pNL_val[0] = exp(-getPM(TEP, absL, PM_HD, n));
+
+    // FIX 1: Change from setting pNL_val[0] to decrementing P_notGuess
+    if (parity_cHD==0 || even==0) {
+        P_notGuess -= exp(-getPM(TEP, absL, PM_HD, n));
+    }
 
     if (ParityCheck(c, H_flat, n, s) == 1){
         double pm = getPM(TEP, absL, PM_HD, n);
         APP_list[0] = pm;
         for(size_t i=0; i<n; i++) chat_list[i] = c[i];
-        s_list[0] = pm; // PM value at index 0
-        s_list[1] = pm; // PM value at index 1 (used by getLConf and getAPP)
-        s_list[2] = T_val[0]; // N
-        s_list[3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even); // Conf
+        s_list[0] = pm;
+        s_list[1] = pm;
+        s_list[2] = T_val[0];
+        s_list[3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even);
         cur_L++;
-        if (even == 1) P_notGuess -= exp(-pm);  // Decrement P_notGuess after guess
+        if (even == 1) P_notGuess -= exp(-pm);
         if ((s_list[3] > thres) || (cur_L == L)){
             getAPP(cur_L, s_list, APP_list);
             curL_val[0] = cur_L;
@@ -634,18 +642,22 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
                 for (size_t i = 0; i < w; i++) TEP[i+u[i]] = 1;
                 AddTEP(c, cHD, TEP, perm, n);
                 T_val[0]++;
-                if (parity_cHD==0 || even==0) pNL_val[0] = exp(-getPM(TEP, absL, PM_HD, n));
+
+                // FIX 2: Change from setting pNL_val[0] to decrementing P_notGuess
+                if (parity_cHD==0 || even==0) {
+                    P_notGuess -= exp(-getPM(TEP, absL, PM_HD, n));
+                }
 
                 if (ParityCheck(c, H_flat, n, s) == 1){
                     double pm = getPM(TEP, absL, PM_HD, n);
                     APP_list[cur_L] = pm;
                     for(size_t i=0; i<n; i++) chat_list[cur_L*n + i] = c[i];
-                    s_list[4*cur_L] = pm; // PM value at index 4*cur_L
-                    s_list[4*cur_L+1] = pm; // PM value at index 4*cur_L+1 (used by getLConf and getAPP)
-                    s_list[4*cur_L+2] = T_val[0]; // N
-                    s_list[4*cur_L+3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even); // Conf
+                    s_list[4*cur_L] = pm;
+                    s_list[4*cur_L+1] = pm;
+                    s_list[4*cur_L+2] = T_val[0];
+                    s_list[4*cur_L+3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even);
                     cur_L++;
-                    if (even == 1) P_notGuess -= exp(-pm);  // Decrement P_notGuess after guess
+                    if (even == 1) P_notGuess -= exp(-pm);
                     if ((s_list[4*(cur_L-1)+3] > thres) || (cur_L == L)){
                         getAPP(cur_L, s_list, APP_list);
                         curL_val[0] = cur_L;
@@ -668,7 +680,7 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
                 u[k_mt]++;
                 mountain_build(u,k_mt,w,W1,n1);
 
-            } while (++mountain_iter_guard < 100000); // Safety break
+            } while (++mountain_iter_guard < 100000);
 
             w++;
             if (even==1 && (w%2 != parity_cHD)) w++;
@@ -677,9 +689,14 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
     }
 
     curL_val[0] = cur_L;
+
+    // FIX 3: Update pNL_val[0] with the final P_notGuess value
+    pNL_val[0] = P_notGuess;
+
     getAPP(cur_L, s_list, APP_list);
     free(perm); free(cHD); free(TEP); free(c); free(absL); free(u); free(D); free(d);
 }
+
 
 uint8_t ParityCheck(uint8_t *c, uint8_t *H, uint64_t n, uint64_t s) {
     for (size_t j = 0; j < s; j++){

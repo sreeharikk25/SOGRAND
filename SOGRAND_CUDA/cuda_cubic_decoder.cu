@@ -700,6 +700,8 @@ int main(int argc, char *argv[]) {
     int* d_NG_total;
     CUDA_CHECK(cudaMallocManaged(&d_NG_total, sizeof(int)));
 
+    clock_t start_time = clock();
+
     while (fread(llr_buffer, sizeof(double), codeword_block_size, fin) == codeword_block_size) {
         block_count++;
 
@@ -812,7 +814,7 @@ int main(int argc, char *argv[]) {
     }
 
     clock_t end_time = clock();
-    double cpu_time_used = ((double) end_time) / CLOCKS_PER_SEC;
+    double cpu_time_used = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
 
     if (bit_count_out > 0) {
         byte_out <<= (8 - bit_count_out);

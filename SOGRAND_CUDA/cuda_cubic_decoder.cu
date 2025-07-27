@@ -811,6 +811,9 @@ int main(int argc, char *argv[]) {
         CUDA_CHECK(cudaFree(input));
     }
 
+    clock_t end_time = clock();
+    double cpu_time_used = ((double) end_time) / CLOCKS_PER_SEC;
+
     if (bit_count_out > 0) {
         byte_out <<= (8 - bit_count_out);
         fwrite(&byte_out, 1, 1, fout);
@@ -820,6 +823,7 @@ int main(int argc, char *argv[]) {
     printf("Average iterations per block: %.2f\n", total_iterations / block_count);
     printf("Average NG per block: %.2f\n", (double)total_NG / block_count);
     printf("Average NG per info bit: %.2f\n", (double)total_NG / (block_count * k * k * k));
+    printf("Total time: %.2f seconds\n", cpu_time_used);
 
     // Cleanup
     fclose(fin);

@@ -51,4 +51,4 @@ echo "Original data size: $(wc -c < ${ORIG_DATA}) bytes"
 echo "Encoded data size: $(wc -c < ${ENCODED_DATA}) bytes"
 echo "Decoded data size: $(wc -c < ${DECODED_DATA}) bytes"
 
-echo "--- Pipeline finished ---"
+echo "--- Pipeline finished ---"                        

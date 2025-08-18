@@ -44,10 +44,10 @@ echo "  - Compiling CUDA cubic encoder..."
 nvcc -O3 -arch=sm_60 -std=c++11 cuda_cubic_encoder.cu -o cuda_cubic_encoder
 
 echo "  - Compiling channel simulator..."
-gcc -O3 -std=c99 channel_sim.c -o channel_sim -lm
+gcc -O3 -std=c99 -D_GNU_SOURCE -D_USE_MATH_DEFINES channel_sim.c -o channel_sim -lm
 
 echo "  - Compiling CUDA cubic decoder..."
-nvcc -O3 -arch=sm_60 -std=c++11 cuda_cubic_decoder.cu -o cuda_cubic_decoder
+nvcc -O3 -arch=sm_80 -Xcompiler='-O3 -march=native' -o cuda_cubic_decoder cuda_cubic_decoder.cu -lcublas
 
 echo "  - Compiling comparator..."
 gcc -O3 -std=c99 comparator.c -o comparator
@@ -88,7 +88,7 @@ fi
 
 # 6. Decode the LLRs to recover the data using CUDA decoder
 echo "CUDA Decoding data..."
-./cuda_cubic_decoder ${CORRUPTED_LLRS} ${DECODED_DATA}
+./cuda_cubic_decoder ${CORRUPTED_LLRS} ${DECODED_DATA} 4 512
 if [[ $? -ne 0 ]]; then
     echo "ERROR: CUDA decoding failed."
     exit 1
@@ -158,7 +158,7 @@ if [[ "$1" == "--extended" ]]; then
     echo "  Channel..."
     time ./channel_sim encoded_large.bin llr_large.bin 1.5 3
     echo "  Decoding..."
-    time ./cuda_cubic_decoder llr_large.bin decoded_large.bin
+    time ./cuda_cubic_decoder llr_large.bin decoded_large.bin 4 512
     echo "  Verification..."
     ./comparator large_data.bin decoded_large.bin
 

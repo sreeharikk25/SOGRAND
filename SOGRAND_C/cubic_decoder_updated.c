@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <float.h> // SK: added to get the built-in EPSILON for doubles
 #include <stddef.h>
 
 #ifndef M_PI
@@ -11,6 +12,9 @@
 #endif
 
 #define Inf 0x7fffffff
+
+static const double EPSILON = DBL_EPSILON; // SK: Used to obtain more precise L_E and L_APP 
+// EPSILON is used instead of e-9 and e-30
 
 // --- Data Structures for 3D Tensor ---
 typedef struct {
@@ -64,6 +68,7 @@ int main(int argc, char *argv[]) {
     const char* input_filename = argv[1];
     const char* output_filename = argv[2];
 
+
     const int n = 16;
     const int k = 8;
     const int codeword_block_size = n * n * n;
@@ -101,8 +106,6 @@ int main(int argc, char *argv[]) {
     FILE* fout = fopen(output_filename, "wb");
     if (!fout) { perror("Error opening output file"); fclose(fin); return 1; }
 
-    printf("Decoding %s to %s using cubic code (n=%d, k=%d)...\n", input_filename, output_filename, n, k);
-
     double llr_buffer[codeword_block_size];
     int bit_buffer[message_block_size];
     unsigned char byte_out = 0;
@@ -114,7 +117,6 @@ int main(int argc, char *argv[]) {
     int block_count = 0;
 
     while (fread(llr_buffer, sizeof(double), codeword_block_size, fin) == codeword_block_size) {
-        block_count++;
         Tensor_d L_channel = create_tensor_d(n, n, n);
         memcpy(L_channel.data, llr_buffer, codeword_block_size * sizeof(double));
 
@@ -125,6 +127,12 @@ int main(int argc, char *argv[]) {
 
         // Initialize L_E to zeros
         memset(L_E.data, 0, codeword_block_size * sizeof(double));
+
+        // Initial hard decision
+        Tensor_i c_HD = create_tensor_i(n, n, n);
+        for(int i = 0; i < codeword_block_size; i++) {
+            c_HD.data[i] = (L_channel.data[i] > 0) ? 0 : 1;
+        }
 
         double vec_in[n], vec_L_APP[n], vec_L_E_vec[n];
         double n_iter = 0;
@@ -161,7 +169,15 @@ int main(int argc, char *argv[]) {
             }
             NG_p += NGmax;
             
-            if (early_termination(L_APP, G, n, k)) break;
+            
+            // Update c_HD
+            for(int i = 0; i < codeword_block_size; i++) {
+                c_HD.data[i] = (L_APP.data[i] > 0) ? 0 : 1;
+            }
+            
+            if (early_termination(L_APP, G, n, k)) {
+                break;
+            }
 
             // Rows
             NGmax = 0;
@@ -192,13 +208,21 @@ int main(int argc, char *argv[]) {
             }
             NG_p += NGmax;
             
-            if (early_termination(L_APP, G, n, k)) break;
+            // Update c_HD
+            for(int i = 0; i < codeword_block_size; i++) {
+                c_HD.data[i] = (L_APP.data[i] > 0) ? 0 : 1;
+            }
+            
+            if (early_termination(L_APP, G, n, k)) {
+                
+                break;
+            }
 
             // Slices
             NGmax = 0;
             n_iter += 0.5;
             
-            // L_A = alpha(2*i) * L_E (using same alpha as previous dimension)
+            // L_A = alpha(2*i) * L_E
             for(int idx = 0; idx < codeword_block_size; idx++) {
                 L_A.data[idx] = alpha[2*iter-1] * L_E.data[idx];
             }
@@ -223,7 +247,16 @@ int main(int argc, char *argv[]) {
             }
             NG_p += NGmax;
             
-            if (early_termination(L_APP, G, n, k)) break;
+  
+            // Update c_HD
+            for(int i = 0; i < codeword_block_size; i++) {
+                c_HD.data[i] = (L_APP.data[i] > 0) ? 0 : 1;
+            }
+            
+            if (early_termination(L_APP, G, n, k)) {
+               
+                break;
+            }
         }
 
         total_NG += NG;
@@ -232,6 +265,8 @@ int main(int argc, char *argv[]) {
 
         // Hard Decode the final L_APP to get the codeword
         hard_decision(L_APP.data, bit_buffer, message_block_size);
+
+       
 
         // Convert bit_buffer to bytes and write to output file
         for (int i = 0; i < message_block_size; i++) {
@@ -249,6 +284,8 @@ int main(int argc, char *argv[]) {
         free_tensor_d(L_E);
         free_tensor_d(L_A);
         free_tensor_d(input);
+        free_tensor_i(c_HD);
+        block_count++;
     }
 
     if (bit_count_out > 0) {
@@ -265,6 +302,8 @@ int main(int argc, char *argv[]) {
     printf("Average NG per info bit: %.2f\n", (double)total_NG / (block_count * k * k * k));
     printf("Average NG_p per block: %.2f\n", (double)total_NG_p / block_count);
     printf("Total CPU time: %.2f seconds\n", cpu_time_used);
+    
+    
     
     fclose(fin);
     fclose(fout);
@@ -362,6 +401,7 @@ void hard_decision(double* llr, int* bits, int length) {
     int expected_length = k * k * k;
     if (length != expected_length) {
         fprintf(stderr, "Warning: hard_decision length mismatch\n");
+
     }
     
     for (int slice = 0; slice < k; slice++) {
@@ -500,14 +540,14 @@ void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** 
     } else {
         double* PM = (double*)malloc(sizeof(double) * curL);
         for(int i=0; i<curL; ++i) PM[i] = s_list[4*i + 1];
-        double p_notinlist = fmax(pNL_val, 1e-9);
+        double p_notinlist = fmax(pNL_val, EPSILON);
 
         double pp1[n], pp0[n];
-        for(int i=0; i<n; ++i) {
+        for(int i=0; i<n; ++i) { // changed e-9 to EPSILON
             pp1[i] = 1.0 / (1.0 + exp(llr[i]));
             pp0[i] = 1.0 - pp1[i];
-            pp1[i] = fmax(pp1[i], 1e-9); pp1[i] = fmin(pp1[i], 1.0 - 1e-9);
-            pp0[i] = fmax(pp0[i], 1e-9); pp0[i] = fmin(pp0[i], 1.0 - 1e-9);
+            pp1[i] = fmax(pp1[i], EPSILON); pp1[i] = fmin(pp1[i], 1.0 - EPSILON);
+            pp0[i] = fmax(pp0[i], EPSILON); pp0[i] = fmin(pp0[i], 1.0 - EPSILON);
         }
 
         double p[curL];
@@ -529,8 +569,8 @@ void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** 
             p1[i] += p_notinlist * pp1[i];
         }
 
-        for(int i=0; i<n; ++i) {
-            L_APP[i] = log(fmax(p0[i], 1e-30)) - log(fmax(p1[i], 1e-30));
+        for(int i=0; i<n; ++i) { // SK: changed e-30 to EPSILON
+            L_APP[i] = log(fmax(p0[i], EPSILON)) - log(fmax(p1[i], EPSILON));
             L_E[i] = L_APP[i] - llr[i];
         }
         free(PM);
@@ -547,6 +587,7 @@ void SOGRAND_bitSO(double* L_APP, double* L_E, int* N_guess, double* llr, int** 
 void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double* curL_val, double* pNL_val, double* APP_list, double* llr, uint8_t* H_flat, int n, int s, int IC, uint64_t L, uint64_t Tmax, double thres, int even){
     size_t *perm = calloc(n, sizeof(size_t));
     uint8_t *cHD = calloc(n, sizeof(uint8_t));
+    uint8_t parity_cHD;
     uint8_t *TEP = calloc(n, sizeof(uint8_t));
     uint8_t *c   = calloc(n, sizeof(uint8_t));
     double *absL = calloc(n, sizeof(double));
@@ -554,132 +595,154 @@ void sogrand_main_logic(double* chat_list, double* s_list, double* T_val, double
     int32_t *d   = calloc(n, sizeof(int32_t));
     int32_t *D   = calloc(n, sizeof(int32_t));
 
-    for(size_t i = 0; i < n; i++) perm[i] = i;
-    for(size_t i = 0; i < 4*L; i++) s_list[i] = 0; // Initialize s_list
+    for(size_t i = 0; i < n; i++)  perm[i] = i; 
+    for(size_t i = 0; i < 4*L; i++) s_list[i] = 0;  // Initialize s_list
     for(size_t i = 0; i < L; i++) APP_list[i] = 0; // Initialize APP_list
 
     uint64_t cur_L = 0;
     HardDec(cHD, llr, n);
-    uint8_t parity_cHD = parity(cHD,n);
+    parity_cHD = parity(cHD,n);
     pNL_val[0] = 0.0;
+    
+    if (Tmax==0) Tmax=Inf;   
 
-    if (Tmax==0) Tmax=Inf;
-
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++){
         TEP[i] = 0;
         absL[i] = fabs(llr[i]);
     }
 
-    double P_notGuess = 1.0;
+    double P_notGuess = 1.0; 
     if (even==1) P_notGuess = prob_parity(parity_cHD,absL,n);
 
     double PM_HD = getPM_HD(absL, n);
     QuickSort(absL, perm, n);
-
     if (IC < 0){
-        if (round((double)n/2) > 1) {
-            double beta = (absL[(uint64_t)round((double)n/2) - 1] - absL[0]) / (round((double)n/2) - 1);
-            IC = (beta > 1e-9) ? findMax((int32_t)round(absL[0]/beta - 1), 0) : 0;
-        } else {
-            IC = 0;
-        }
+        double beta = ( absL[ (uint64_t)round((double)n/2) - 1] - absL[0] ) / ( round((double)n/2) - 1 );
+        IC = findMax( (int32_t)round( absL[0]/beta -1 ), 0 );
     }
 
     AddTEP(c, cHD, TEP, perm, n);
     T_val[0] = 1;
-    if (parity_cHD==0 || even==0) pNL_val[0] = exp(-getPM(TEP, absL, PM_HD, n));
+    if (parity_cHD==0||even==0) P_notGuess -= exp(-getPM(TEP, absL, PM_HD, n)); 
 
     if (ParityCheck(c, H_flat, n, s) == 1){
-        double pm = getPM(TEP, absL, PM_HD, n);
-        APP_list[0] = pm;
-        for(size_t i=0; i<n; i++) chat_list[i] = c[i];
-        s_list[0] = pm; // PM value at index 0
-        s_list[1] = pm; // PM value at index 1 (used by getLConf and getAPP)
-        s_list[2] = T_val[0]; // N
-        s_list[3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even); // Conf
+        s_list[0] = 0; // SK: set to 0
+        s_list[1] = getPM(TEP, absL, PM_HD, n); // SK: this is set to PM -> used to get LConf and APP
+        for(size_t i = 0; i < n; i++) chat_list[i] = c[i];
+        s_list[2] = 1; // SK: set to 1
+        s_list[3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even);
         cur_L++;
-        if (even == 1) P_notGuess -= exp(-pm);  // Decrement P_notGuess after guess
-        if ((s_list[3] > thres) || (cur_L == L)){
+        curL_val[0] = (double)cur_L; // SK: set curL_val outside the if statement after updating cur_L
+        if ( (s_list[3] > thres) || (cur_L == L) ){
             getAPP(cur_L, s_list, APP_list);
-            curL_val[0] = cur_L;
-            free(perm); free(cHD); free(TEP); free(c); free(absL); free(u); free(D); free(d);
+            free(perm);free(cHD);free(TEP);free(c);free(absL);free(u);free(D);free(d);
             return;
         }
     }
-
+    int32_t w = 0;
+    int parity_w;
+    int32_t W = 0;
     int32_t wt = IC + 1;
-    while ((cur_L < L) && (T_val[0] < Tmax)) {
-        int32_t w = 1;
-        double temp_sqrt = pow(1+2*((double)n+(double)IC), 2.0) - 8*wt;
-        if (temp_sqrt >= 0) {
-            w = findMax(1, (int32_t)ceil((1+2*((double)n+(double)IC) - sqrt(temp_sqrt))/2.0));
-        } else {
-             wt++; continue;
-        }
-
+    int32_t wt_max = IC*n+n*(n+1)/2;
+    int32_t W1;
+    int32_t n1;
+    int32_t k_mt;
+    double temp = 1+2*( (double)n + (double)IC );
+    // SK: added condition (wt <= wt_max)
+    while ( (cur_L < L) && (T_val[0] < Tmax) && (wt <= wt_max) ){
+        w = findMax(1, (int32_t)ceil((temp-sqrt(pow((double)temp, 2.0)-8*wt))/2) );
+        parity_w = w%2;
         if (even==1 && (w%2 != parity_cHD)) w++;
 
-        while (w <= n) {
-            int32_t W = wt - IC*w;
-            if (W < w*(w+1)/2) break;
+        while ( w <= n ){
+            W = wt - IC*w;
+            if(W < w*(w+1)/2) break;
 
-            int32_t W1 = W - w*(w+1)/2;
-            int32_t n1 = n - w;
+            W1 = W - w*(w+1)/2;
+            n1 = n - w;
             for (size_t i = 0; i < w; i++) u[i] = 0;
 
             mountain_build(u,0,w,W1,n1);
 
-            int mountain_iter_guard = 0;
-            do {
-                for (size_t i = 0; i < n; i++) TEP[i] = 0;
-                for (size_t i = 0; i < w; i++) TEP[i+u[i]] = 1;
-                AddTEP(c, cHD, TEP, perm, n);
-                T_val[0]++;
-                if (parity_cHD==0 || even==0) pNL_val[0] = exp(-getPM(TEP, absL, PM_HD, n));
+            for (size_t i = 0; i < n; i++) TEP[i] = 0;
+            for (size_t i = 0; i < w; i++) TEP[i+u[i]] = 1;
+            AddTEP(c, cHD, TEP, perm, n);
+            T_val[0]++;
 
-                if (ParityCheck(c, H_flat, n, s) == 1){
-                    double pm = getPM(TEP, absL, PM_HD, n);
-                    APP_list[cur_L] = pm;
-                    for(size_t i=0; i<n; i++) chat_list[cur_L*n + i] = c[i];
-                    s_list[4*cur_L] = pm; // PM value at index 4*cur_L
-                    s_list[4*cur_L+1] = pm; // PM value at index 4*cur_L+1 (used by getLConf and getAPP)
-                    s_list[4*cur_L+2] = T_val[0]; // N
-                    s_list[4*cur_L+3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even); // Conf
-                    cur_L++;
-                    if (even == 1) P_notGuess -= exp(-pm);  // Decrement P_notGuess after guess
-                    if ((s_list[4*(cur_L-1)+3] > thres) || (cur_L == L)){
-                        getAPP(cur_L, s_list, APP_list);
-                        curL_val[0] = cur_L;
-                        free(perm); free(cHD); free(TEP); free(c); free(absL); free(u); free(D); free(d);
-                        return;
+            P_notGuess -= exp(-getPM(TEP, absL, PM_HD, n)); // SK: after updating TEP --> get P_notGuess
+
+            if (ParityCheck(c, H_flat, n, s) == 1){
+                s_list[4*cur_L] = wt; // SK: set to wt
+                s_list[4*cur_L+1] = getPM(TEP, absL, PM_HD, n);
+                for(size_t i = 0; i < n; i++) chat_list[cur_L*n + i] = c[i];
+                s_list[4*cur_L+2] = T_val[0];
+                s_list[4*cur_L+3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even);
+                cur_L++;
+                curL_val[0] = (double)cur_L; // SK: after updating cur_L --> update curL_val
+                if ( (s_list[4*(cur_L-1)+3] > thres) || (cur_L == L)){
+                    getAPP(cur_L, s_list, APP_list);
+                    free(perm);free(cHD);free(TEP);free(c);free(absL);free(u);free(D);free(d);
+                    return;
+                }
+            }
+            // SK: if parityCheck is not 1 --> update our d and D and continue --> mountain build etc.. 
+            for (size_t i = 0; i < w - 1; i++) d[i] = u[i+1] - u[i];
+            d[w-1] = 0;
+            D[w-1] = d[w-1];
+            for (size_t i = 1; i < w; i++) D[w-i-1] = D[w-i] + d[w-i-1]; // SK: the way this was previously defined looked identical at a high-level --> but at some instances it looks different
+            // will examine further
+
+            while( D[0] >= 2 ){
+                k_mt = 0;
+                for (size_t i = w-1; i > 0; i--){
+                    if (D[i] >= 2){
+                        k_mt = i;
+                        break;
                     }
                 }
 
-                for (size_t i = 0; i < w - 1; i++) d[i] = u[i+1] - u[i];
+                u[k_mt] ++;
+                mountain_build(u,k_mt,w,W1,n1);
+                // SK: After mountain build --> we update TEP and then update P_notGuess
+                for (size_t i = 0; i < n; i++) TEP[i] = 0;
+                for (size_t i = 0; i < w; i++) TEP[i+u[i]] = 1;
+
+                AddTEP(c, cHD, TEP, perm, n);
+                T_val[0]++;
+                P_notGuess -= exp(-getPM(TEP, absL, PM_HD, n));
+
+                if (ParityCheck(c, H_flat, n, s) == 1){
+                    s_list[4*cur_L] = wt;
+                    s_list[4*cur_L+1] = getPM(TEP, absL, PM_HD, n);
+                    for(size_t i = 0; i < n; i++) chat_list[cur_L*n + i] = c[i];
+                    s_list[4*cur_L+2] = T_val[0];
+                    s_list[4*cur_L+3] = getLConf(pNL_val, P_notGuess, cur_L, s_list, s, even);
+                    cur_L++;
+                    curL_val[0] = (double)cur_L;
+                    if ( (s_list[4*(cur_L-1)+3] > thres) || (cur_L == L) ){
+                        getAPP(cur_L, s_list, APP_list);
+                        free(perm);free(cHD);free(TEP);free(c);free(absL);free(u);free(D);free(d);
+                        return;
+                    }
+                }
+                for (size_t i = 0; i < w - 1; i++)
+                    d[i] = u[i+1] - u[i];
                 d[w-1] = 0;
                 D[w-1] = d[w-1];
-                for (int i = w - 2; i >= 0; i--) D[i] = D[i+1] + d[i];
-
-                if (D[0] < 2) break;
-
-                int32_t k_mt = 0;
-                for (int i = w-1; i > 0; i--) {
-                    if (D[i] >= 2) { k_mt = i; break; }
+                for (size_t i = 1; i < w; i++)
+                    D[w-i-1] = D[w-i] + d[w-i-1];
+            }
+            w ++;
+            parity_w = w%2;
+            if (even==1) {
+                if (parity_w!=parity_cHD){
+                w ++;
                 }
-                u[k_mt]++;
-                mountain_build(u,k_mt,w,W1,n1);
-
-            } while (++mountain_iter_guard < 100000); // Safety break
-
-            w++;
-            if (even==1 && (w%2 != parity_cHD)) w++;
+            }
         }
-        wt++;
+        wt ++;
     }
-
-    curL_val[0] = cur_L;
-    getAPP(cur_L, s_list, APP_list);
-    free(perm); free(cHD); free(TEP); free(c); free(absL); free(u); free(D); free(d);
+    free(perm);free(cHD);free(TEP);free(c);free(absL);free(u);free(D);free(d);
 }
 
 uint8_t ParityCheck(uint8_t *c, uint8_t *H, uint64_t n, uint64_t s) {
@@ -692,29 +755,30 @@ uint8_t ParityCheck(uint8_t *c, uint8_t *H, uint64_t n, uint64_t s) {
 }
 
 int32_t findMax(int32_t a, int32_t b) { return !(b > a) ? a : b; }
-void HardDec(uint8_t *c, double *llr, uint64_t n) { for (size_t i = 0; i < n; i++) c[i] = (llr[i] > 0.0) ? 0 : 1; }
-int parity(uint8_t array[], uint64_t n) { int sum = 0; for (uint64_t i = 0; i < n; i++) sum += array[i]; return sum % 2; }
-double prob_parity(int parity_cHD, double *absL, uint64_t n) { double p_e = 1.0; for (uint64_t i = 0; i < n; i++) { p_e *= (1.0 - 2.0 * exp(-absL[i]) / (1.0 + exp(-absL[i]))); } p_e = 0.5 * (1.0 + p_e); return (parity_cHD == 0) ? p_e : 1.0 - p_e; }
-void AddTEP(uint8_t *c, uint8_t *cHD, uint8_t *TEP, size_t *perm, uint64_t n) { for (size_t i = 0; i < n; i++) c[perm[i]] = cHD[perm[i]] ^ TEP[i]; }
-double JacLog(double x) { if (x > 30) return x; if (x < -30) return 0.0; return log(1.0 + exp(x)); }
-void QuickSort(double *a, size_t *perm, uint64_t n) { if (n < 2) return; double p = a[n / 2]; uint64_t i = 0, j = n - 1; while (i <= j) { while (a[i] < p) i++; while (a[j] > p) j--; if (i <= j) { double t = a[i]; a[i] = a[j]; a[j] = t; size_t tt = perm[i]; perm[i] = perm[j]; perm[j] = tt; i++; j--; } } if (j > 0) QuickSort(a, perm, j + 1); if (i < n) QuickSort(a + i, perm + i, n - i); }
-double getPM_HD(double *absL, uint64_t n) { double pm = 0; for(size_t i=0; i<n; i++) pm += JacLog(-absL[i]); return pm; }
-double getPM(uint8_t *TEP, double *absL, double PM_HD, uint64_t n) { double pm = PM_HD; for(size_t i = 0; i < n; i++) { if (TEP[i] == 1) pm += (JacLog(absL[i]) - JacLog(-absL[i])); } return pm; }
+void HardDec(uint8_t *c, double *llr, uint64_t n) {for (size_t i = 0; i < n; i++) c[i] = (llr[i] > 0.0) ? 0 : 1;}
+int parity(uint8_t array[], uint64_t n) {int sum = 0;for (uint64_t i = 0; i < n; i++) sum += array[i];return sum % 2;}
+double prob_parity(int parity_cHD, double *absL, uint64_t n) {double p_e = 1.0;for (uint64_t i = 0; i < n; i++) {p_e *= (1.0 - 2.0 * exp(-absL[i]) / (1.0 + exp(-absL[i])));}p_e = 0.5 * (1.0 + p_e);return (parity_cHD == 0) ? p_e : 1.0 - p_e;}
+void AddTEP(uint8_t *c, uint8_t *cHD, uint8_t *TEP, size_t *perm, uint64_t n) {for (size_t i = 0; i < n; i++) c[perm[i]] = cHD[perm[i]] ^ TEP[i];}
+double JacLog(double x) {if (x > 50) return x;if (x < -50) return 0.0;return log(1.0 + exp(x));} // SK: updated to 50 instead of 30 --> for the approximation
+void QuickSort(double *a, size_t *perm, uint64_t n) {if (n < 2) return; double p = a[n / 2];uint64_t i = 0, j = n - 1;while (i <= j) {while (a[i] < p) i++;while (a[j] > p) j--;if (i <= j) {double t = a[i]; a[i] = a[j]; a[j] = t;size_t tt = perm[i]; perm[i] = perm[j]; perm[j] = tt;i++; j--;}}if (j > 0) QuickSort(a, perm, j + 1);if (i < n) QuickSort(a + i, perm + i, n - i);}
+double getPM_HD(double *absL, uint64_t n) {double pm = 0;for(size_t i=0; i<n; i++) pm += JacLog(-absL[i]);return pm;}
+double getPM(uint8_t *TEP, double *absL, double PM_HD, uint64_t n) {double pm = PM_HD;for(size_t i = 0; i < n; i++) {if (TEP[i] == 1) pm += (JacLog(absL[i]) - JacLog(-absL[i]));}return pm;}
+
 double getLConf(double *pNL, double P_notGuess, uint64_t cur_L, double *score, uint64_t s, uint8_t even) {
     double P_pos = 0.0;
     for(size_t i = 0; i <= cur_L; i++) P_pos += exp(-score[4*i+1]);
     if(even==1) s--;
     double P_neg = pow(2.0, -(double)s) * P_notGuess;
     pNL[0] = P_neg;
-    return (P_pos + P_neg > 1e-9) ? (P_pos / (P_pos + P_neg)) : 1.0;
-}
+    return (P_pos + P_neg > EPSILON) ? (P_pos / (P_pos + P_neg)) : 1.0;
+} // SK: changed e-9 to EPSILON 
 void mountain_build(int32_t *u, int32_t k, int32_t w, int32_t W1, int32_t n1){
     for(size_t i = k + 1; i < w; i++)
         u[i] = u[k];
     uint64_t W2 = W1;
     for(size_t i = 0; i < w; i++)
         W2 -= u[i];
-    uint64_t q = (uint64_t)floor( (double)W2 / (double)(n1 - u[k]) );
+    uint64_t q = (uint64_t)floor( W2 / (n1 - u[k]) );
     uint64_t r = W2 - q*(n1 - u[k]);
     if (q != 0){
         for(size_t i = w-q; i < w; i++)
@@ -723,4 +787,4 @@ void mountain_build(int32_t *u, int32_t k, int32_t w, int32_t W1, int32_t n1){
     if (w > q)
         u[w-q-1] = u[w-q-1] + r;
 }
-void getAPP(uint64_t cur_L, double *score, double *APP) { if (cur_L == 0) return; double P_pos = 0.0; for(size_t i=0; i<cur_L; i++) P_pos += exp(-score[4*i+1]); if (P_pos < 1e-30) return; double den = score[4*(cur_L-1)+3] / P_pos; for(size_t i=0; i<cur_L; i++) APP[i] = exp(-score[4*i+1]) * den; }
+void getAPP(uint64_t cur_L, double *score, double *APP) {if (cur_L == 0) return;double P_positive = 0.0;for(size_t i=0; i<cur_L; i++) P_positive += exp(-score[4*i+1]);if (P_positive < EPSILON) return;double den = score[4*(cur_L-1)+3] / P_positive;for(size_t i=0; i<cur_L; i++) APP[i] = exp(-score[4*i+1]) * den;} // SK: changed e-30 to EPSILON 

@@ -109,9 +109,9 @@ int main(int argc, char *argv[]) {
 
     const char* input_filename = argv[1];
     const char* output_filename = argv[2];
-
-    const int n = 15;
-    const int k = 10;
+    // Code parameters 
+    const int n = 16;
+    const int k = 8;
     const int message_block_size = k * k * k;
 
     int** G = (int**)malloc(k * sizeof(int*));
@@ -194,6 +194,7 @@ void getGH_sys_CRC(int n, int k, int** G) {
     else if (r == 5 && k <= 26) hex_poly = "0x12";
     else if (r == 6 && k <= 25) hex_poly = "0x23";
     else if (r == 6 && k <= 57) hex_poly = "0x33";
+    else if (r==8 && k<=8) hex_poly = "0xeb";
     else {
         fprintf(stderr, "Error: (n, k) = (%d, %d) is not supported.\n", n, k);
         exit(1);

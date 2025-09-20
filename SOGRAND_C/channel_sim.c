@@ -29,8 +29,8 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Code parameters for calculating noise variance ---
-    const int n = 15;
-    const int k = 10;
+    const int n = 16;
+    const int k = 8;
     const double R = pow((double)k / n, code_dim); // Rate depends on dimension
 
     // --- Calculate sigma from Eb/N0 ---
@@ -53,6 +53,10 @@ int main(int argc, char *argv[]) {
     printf("Simulating AWGN channel for Eb/N0 = %.2f dB (sigma = %f)...\n", EbN0dB, sigma);
     srand(time(NULL));
 
+    // added by sarah 
+    FILE* f_noise = fopen("noise_values.bin", "wb");
+    FILE* f_y = fopen("y_values.bin", "wb");
+
     int byte_in;
     while ((byte_in = fgetc(fin)) != EOF) {
         for (int i = 7; i >= 0; i--) {
@@ -62,15 +66,28 @@ int main(int argc, char *argv[]) {
             double x = (bit == 0) ? 1.0 : -1.0;
 
             // 2. Add noise
-            double y = x + sigma * normal_dist_rand();
+            //double y = x + sigma * normal_dist_rand();
 
             // 3. Calculate LLR
+            // double llr = 2.0 * y / variance;
+
+            double noise = sigma * normal_dist_rand();
+            double y = x + noise; 
+
+            fwrite(&noise, sizeof(double), 1, f_noise);
+            fwrite(&y, sizeof(double), 1, f_y);
+            
             double llr = 2.0 * y / variance;
+
+            // added here by Sarah for debugging
+            // printf("LLR: %.6f\n", llr);  // Adjust precision if needed
+
 
             // 4. Write LLR to output file
             fwrite(&llr, sizeof(double), 1, fout);
         }
     }
+
 
     printf("Channel simulation complete. Output file '%s' contains LLRs.\n", output_filename);
 

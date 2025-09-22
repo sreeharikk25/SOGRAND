@@ -621,7 +621,6 @@ __global__ void optimized_sogrand_kernel(
     if (batch_id >= total_blocks) return;
 
     const int work_id = threadIdx.x;
-    if (work_id >= n * n) return;
 
     const int cw_size = n * n * n;
     const size_t base = (size_t)batch_id * cw_size;
@@ -629,18 +628,19 @@ __global__ void optimized_sogrand_kernel(
     // FIX 2: Reduced synchronization - simple shared memory
     __shared__ int iteration_count;
     __shared__ int batch_converged;
-    __shared__ int warp_NG_totals[WARPS_PER_BLOCK];
     __shared__ double phase_count;
+    extern __shared__ int warp_NG_totals[];
 
-    int warp_id = threadIdx.x / WARP_SIZE;
-    int lane_id = threadIdx.x % WARP_SIZE;
+    const int warps_per_block = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
 
     if (threadIdx.x == 0) {
         iteration_count = 1;
         batch_converged = 0;
         phase_count = 0.0;
     }
-    if (threadIdx.x < WARPS_PER_BLOCK) {
+    if (threadIdx.x < warps_per_block) {
         warp_NG_totals[threadIdx.x] = 0;
     }
     __syncthreads();
@@ -817,7 +817,7 @@ __global__ void optimized_sogrand_kernel(
     // FIX 1: Final reduction with single atomic per block
     if (threadIdx.x == 0) {
         int total_NG = 0;
-        for (int w = 0; w < WARPS_PER_BLOCK; w++) {
+        for (int w = 0; w < warps_per_block; w++) {
             total_NG += warp_NG_totals[w];
         }
 
@@ -1077,12 +1077,13 @@ int main(int argc, char *argv[]) {
   clock_t start_time = clock();
 
   // Calculate grid and block dimensions
-  int threads_per_block = THREADS_PER_BLOCK;
+  int threads_per_block = MIN(n * n, THREADS_PER_BLOCK);
   int blocks_per_grid = MIN(total_blocks, MAX_BLOCKS_PER_KERNEL);
+  size_t shared_mem_size = ((threads_per_block + WARP_SIZE - 1) / WARP_SIZE) * sizeof(int);
 
   if (total_blocks <= MAX_BLOCKS_PER_KERNEL) {
       // Single kernel launch for all blocks
-      optimized_sogrand_kernel<<<blocks_per_grid, threads_per_block>>>(
+      optimized_sogrand_kernel<<<blocks_per_grid, threads_per_block, shared_mem_size>>>(
           d_L_channel, d_L_APP, d_L_E, d_convergence_flags, d_NG_count, d_iter_count,
           n, k, L, Tmax, thres, even, Imax, total_blocks);
   } else {
@@ -1091,7 +1092,7 @@ int main(int argc, char *argv[]) {
       while (blocks_processed < total_blocks) {
           int blocks_this_launch = MIN(MAX_BLOCKS_PER_KERNEL, total_blocks - blocks_processed);
 
-          optimized_sogrand_kernel<<<blocks_this_launch, threads_per_block>>>(
+          optimized_sogrand_kernel<<<blocks_this_launch, threads_per_block, shared_mem_size>>>(
               d_L_channel + blocks_processed * cw_size,
               d_L_APP + blocks_processed * cw_size,
               d_L_E + blocks_processed * cw_size,

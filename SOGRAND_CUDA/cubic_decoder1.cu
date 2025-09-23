@@ -732,7 +732,6 @@ __global__ void optimized_sogrand_kernel(
     if (batch_id >= total_blocks) return;
 
     const int work_id = threadIdx.x;
-    if (work_id >= n * n) return;
 
     const int cw_size = n * n * n;
     const size_t base = (size_t)batch_id * cw_size;

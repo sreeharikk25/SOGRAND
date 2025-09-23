@@ -526,195 +526,105 @@ __device__ int check_convergence_optimized(const double* __restrict__ L_APP,
                                           uint8_t* shared_c_HD,
                                           uint8_t* shared_c_test,
                                           int* shared_workspace) {
-  const double* batch_L_APP = L_APP + (size_t)batch_idx * cw_size;
-
-  const int tid = threadIdx.x;
-  const int lane_id = tid % WARP_SIZE;
-  const int warp_id = tid / WARP_SIZE;
-  const int total_threads = blockDim.x;
-  const int num_warps = (total_threads + WARP_SIZE - 1) / WARP_SIZE;
-
-  if (tid == 0) {
-    shared_workspace[WARPS_PER_BLOCK] = 0;
+  if (cw_size > MAX_CW_SIZE) {
+    return 0;
   }
 
+  const double* batch_L_APP = L_APP + (size_t)batch_idx * cw_size;
+  const int tid = threadIdx.x;
+  const int total_threads = blockDim.x;
+  const int lane_id = tid % WARP_SIZE;
+  const int warp_id = tid / WARP_SIZE;
+  const int warps_per_block = (total_threads + WARP_SIZE - 1) / WARP_SIZE;
+
   for (int idx = tid; idx < cw_size; idx += total_threads) {
-    double llr = batch_L_APP[idx];
-    shared_c_HD[idx] = (llr > 0.0) ? 0 : 1;
+    shared_c_HD[idx] = (batch_L_APP[idx] > 0.0) ? 0 : 1;
     shared_c_test[idx] = 0;
   }
   __syncthreads();
 
-  int total_msg_bits = k * k * k;
-  for (int idx = tid; idx < total_msg_bits; idx += total_threads) {
-    int slice = idx / (k * k);
-    int rem = idx % (k * k);
+  const int total_msg_bits = k * k * k;
+  for (int linear = tid; linear < total_msg_bits; linear += total_threads) {
+    int slice = linear / (k * k);
+    int rem = linear % (k * k);
     int row = rem / k;
     int col = rem % k;
-    int target_idx = IDX_FAST(row, col, slice);
-    shared_c_test[target_idx] = shared_c_HD[target_idx];
+    shared_c_test[IDX_FAST(row, col, slice)] = shared_c_HD[IDX_FAST(row, col, slice)];
   }
   __syncthreads();
 
-  int parity_span = n - k;
+  const int parity_span = n - k;
   if (parity_span > 0) {
-    if (num_warps >= 3) {
-      int base = num_warps / 3;
-      int remainder = num_warps % 3;
-      int row_warps = base + (remainder > 0);
-      int col_warps = base + (remainder > 1);
-      int slice_warps = num_warps - row_warps - col_warps;
-      if (slice_warps <= 0) {
-        slice_warps = 1;
-        if (col_warps > row_warps && col_warps > 1) {
-          col_warps--;
-        } else if (row_warps > 1) {
-          row_warps--;
+    const int row_tasks = k * k;
+    for (int task = warp_id; task < row_tasks; task += warps_per_block) {
+      int slice = task / k;
+      int row = task % k;
+      for (int col = k + lane_id; col < n; col += WARP_SIZE) {
+        int parity_val = 0;
+        for (int msg_bit_idx = 0; msg_bit_idx < k; ++msg_bit_idx) {
+          parity_val ^= (shared_c_test[IDX_FAST(row, msg_bit_idx, slice)] &
+                         d_G_const[msg_bit_idx * n + col]);
         }
-      }
-
-      if (warp_id < row_warps) {
-        int local_warp = warp_id;
-        int total_tasks = k * k * parity_span;
-        for (int task = local_warp * WARP_SIZE + lane_id;
-             task < total_tasks;
-             task += row_warps * WARP_SIZE) {
-          int slice = task / (k * parity_span);
-          int rem = task % (k * parity_span);
-          int row = rem / parity_span;
-          int parity_idx = rem % parity_span;
-          int col = k + parity_idx;
-
-          int parity_val = 0;
-          for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-            parity_val += shared_c_test[IDX_FAST(row, msg_bit_idx, slice)] *
-                          d_G_const[msg_bit_idx * n + col];
-          }
+        if (col < n) {
           shared_c_test[IDX_FAST(row, col, slice)] = parity_val & 1;
         }
-      } else if (warp_id < row_warps + col_warps) {
-        int local_warp = warp_id - row_warps;
-        int total_tasks = k * n * parity_span;
-        for (int task = local_warp * WARP_SIZE + lane_id;
-             task < total_tasks;
-             task += col_warps * WARP_SIZE) {
-          int slice = task / (n * parity_span);
-          int rem = task % (n * parity_span);
-          int col = rem / parity_span;
-          int parity_idx = rem % parity_span;
-          int row = k + parity_idx;
-
-          int parity_val = 0;
-          for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-            parity_val += shared_c_test[IDX_FAST(msg_bit_idx, col, slice)] *
-                          d_G_const[msg_bit_idx * n + row];
-          }
-          shared_c_test[IDX_FAST(row, col, slice)] = parity_val & 1;
-        }
-      } else {
-        int local_warp = warp_id - row_warps - col_warps;
-        if (local_warp < slice_warps) {
-          int total_tasks = n * n * parity_span;
-          for (int task = local_warp * WARP_SIZE + lane_id;
-               task < total_tasks;
-               task += slice_warps * WARP_SIZE) {
-            int row = task / (n * parity_span);
-            int rem = task % (n * parity_span);
-            int col = rem / parity_span;
-            int parity_idx = rem % parity_span;
-            int slice = k + parity_idx;
-
-            int parity_val = 0;
-            for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-              parity_val += shared_c_test[IDX_FAST(row, col, msg_bit_idx)] *
-                            d_G_const[msg_bit_idx * n + slice];
-            }
-            shared_c_test[IDX_FAST(row, col, slice)] = parity_val & 1;
-          }
-        }
       }
-    } else {
-      int total_tasks = k * k * parity_span;
-      for (int task = tid; task < total_tasks; task += total_threads) {
-        int slice = task / (k * parity_span);
-        int rem = task % (k * parity_span);
-        int row = rem / parity_span;
-        int parity_idx = rem % parity_span;
-        int col = k + parity_idx;
+    }
+    __syncthreads();
 
+    const int col_tasks = k * n;
+    for (int task = warp_id; task < col_tasks; task += warps_per_block) {
+      int slice = task / n;
+      int col = task % n;
+      for (int row = k + lane_id; row < n; row += WARP_SIZE) {
         int parity_val = 0;
-        for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-          parity_val += shared_c_test[IDX_FAST(row, msg_bit_idx, slice)] *
-                        d_G_const[msg_bit_idx * n + col];
-        }
-        shared_c_test[IDX_FAST(row, col, slice)] = parity_val & 1;
-      }
-      __syncthreads();
-
-      total_tasks = k * n * parity_span;
-      for (int task = tid; task < total_tasks; task += total_threads) {
-        int slice = task / (n * parity_span);
-        int rem = task % (n * parity_span);
-        int col = rem / parity_span;
-        int parity_idx = rem % parity_span;
-        int row = k + parity_idx;
-
-        int parity_val = 0;
-        for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-          parity_val += shared_c_test[IDX_FAST(msg_bit_idx, col, slice)] *
-                        d_G_const[msg_bit_idx * n + row];
-        }
-        shared_c_test[IDX_FAST(row, col, slice)] = parity_val & 1;
-      }
-      __syncthreads();
-
-      total_tasks = n * n * parity_span;
-      for (int task = tid; task < total_tasks; task += total_threads) {
-        int row = task / (n * parity_span);
-        int rem = task % (n * parity_span);
-        int col = rem / parity_span;
-        int parity_idx = rem % parity_span;
-        int slice = k + parity_idx;
-
-        int parity_val = 0;
-        for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-          parity_val += shared_c_test[IDX_FAST(row, col, msg_bit_idx)] *
-                        d_G_const[msg_bit_idx * n + slice];
+        for (int msg_bit_idx = 0; msg_bit_idx < k; ++msg_bit_idx) {
+          parity_val ^= (shared_c_test[IDX_FAST(msg_bit_idx, col, slice)] &
+                         d_G_const[msg_bit_idx * n + row]);
         }
         shared_c_test[IDX_FAST(row, col, slice)] = parity_val & 1;
       }
     }
+    __syncthreads();
+
+    const int slice_tasks = n * n;
+    for (int task = warp_id; task < slice_tasks; task += warps_per_block) {
+      int row = task / n;
+      int col = task % n;
+      for (int slice = k + lane_id; slice < n; slice += WARP_SIZE) {
+        int parity_val = 0;
+        for (int msg_bit_idx = 0; msg_bit_idx < k; ++msg_bit_idx) {
+          parity_val ^= (shared_c_test[IDX_FAST(row, col, msg_bit_idx)] &
+                         d_G_const[msg_bit_idx * n + slice]);
+        }
+        shared_c_test[IDX_FAST(row, col, slice)] = parity_val & 1;
+      }
+    }
+    __syncthreads();
   }
 
-  __syncthreads();
-
-  int local_mismatch = 0;
+  int mismatch = 0;
   for (int idx = tid; idx < cw_size; idx += total_threads) {
-    if (shared_c_test[idx] != shared_c_HD[idx]) {
-      local_mismatch = 1;
-      break;
-    }
+    mismatch |= (shared_c_test[idx] != shared_c_HD[idx]);
   }
 
-  int warp_sum = warp_reduce_sum(local_mismatch);
+  unsigned int active_mask = __activemask();
+  unsigned int ballot = __ballot_sync(active_mask, mismatch != 0);
   if (lane_id == 0) {
-    shared_workspace[warp_id] = warp_sum;
+    shared_workspace[warp_id] = (ballot != 0);
   }
   __syncthreads();
 
   if (warp_id == 0) {
-    int val = (lane_id < num_warps) ? shared_workspace[lane_id] : 0;
-    val = warp_reduce_sum(val);
+    int lane_val = (lane_id < warps_per_block) ? shared_workspace[lane_id] : 0;
+    int warp_sum = warp_reduce_sum(lane_val);
     if (lane_id == 0) {
-      shared_workspace[WARPS_PER_BLOCK] = val;
+      shared_workspace[0] = warp_sum;
     }
   }
   __syncthreads();
 
-  int converged = (shared_workspace[WARPS_PER_BLOCK] == 0);
-  __syncthreads();
-
-  return converged;
+  return (shared_workspace[0] == 0) ? 1 : 0;
 }
 
 // ===================== SIMPLE OPTIMIZED GPU KERNEL =====================

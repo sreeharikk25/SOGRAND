@@ -17,11 +17,24 @@
 
 #define Inf 0x7fffffff
 
-// ===================== Simple Optimized Configuration =====================
-#define THREADS_PER_BLOCK 512
+// ===================== OPTIMIZED Configuration =====================
+// One thread per component line: the decode phases only run for tid < n*n
+// (= 256 for n = 16), so launching more than 256 threads just wastes
+// occupancy on idle threads. The convergence check is grid-strided and
+// works correctly for any block size.
+#define THREADS_PER_BLOCK 256  // = n*n for n = 16
 #define WARP_SIZE 32
 #define WARPS_PER_BLOCK (THREADS_PER_BLOCK / WARP_SIZE)
 #define MAX_BLOCKS_PER_KERNEL 65535
+
+// Max guesses per component (SOGRAND abandonment cap).
+//   UINT64_MAX  -> matches the C reference exactly (no cap).
+//   finite value-> caps worst-case per-line enumeration, which reduces warp
+//                  divergence and improves throughput, but CHANGES the decoded
+//                  output / BER. Benchmark BER before/after if you lower this.
+#ifndef TMAX_PER_COMPONENT
+#define TMAX_PER_COMPONENT UINT64_MAX
+#endif
 
 // ====================================================
 
@@ -32,14 +45,14 @@ static const double EPSILON = 1e-40;
 
 namespace cg = cooperative_groups;
 
-// Constant memory for H and G matrices
+// Constant memory
 __constant__ uint8_t d_H_const[8*16];
 __constant__ int d_G_const[8*16];
 __constant__ double d_alpha_const[100];
 
-// Keep original indexing - don't change memory patterns
+// Optimized indexing with compile-time constants
 __host__ __device__ __forceinline__ int IDX_FAST(int row, int col, int slice) {
-  return (slice << 8) + (row << 4) + col;  // slice*256 + row*16 + col for n=16
+  return (slice << 8) + (row << 4) + col;
 }
 
 #define CUDA_CHECK(call) \
@@ -49,7 +62,7 @@ do { \
     exit(1);} \
 } while(0)
 
-// FIX 1: Warp-level reductions to reduce atomic contention
+// Warp-level primitives
 __device__ __forceinline__ int warp_reduce_sum(int val) {
   #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
@@ -58,7 +71,15 @@ __device__ __forceinline__ int warp_reduce_sum(int val) {
   return val;
 }
 
-// Simple vectorized memory operations (keep existing approach)
+__device__ __forceinline__ int warp_reduce_or(int val) {
+  #pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    val |= __shfl_down_sync(0xffffffff, val, offset);
+  }
+  return val;
+}
+
+// Vectorized memory operations
 __device__ __forceinline__ double4 load_double4_fast(const double* addr) {
   return *reinterpret_cast<const double4*>(addr);
 }
@@ -75,7 +96,7 @@ __device__ __forceinline__ void store_double2_fast(double* addr, double2 val) {
   *reinterpret_cast<double2*>(addr) = val;
 }
 
-// Vector helper functions (unchanged)
+// Vector helper functions
 __device__ __forceinline__ double2 make_double2_safe(double x, double y) {
   return make_double2(x, y);
 }
@@ -110,7 +131,7 @@ __device__ __forceinline__ uint4 xor_parity_uint4(uint4 c_vec, uint4 h_vec) {
   );
 }
 
-// ===================== Device Helper Functions (SOGRAND Logic UNCHANGED) =====================
+// ===================== Device Helper Functions (UNCHANGED LOGIC) =====================
 __device__ uint8_t ParityCheck_device_vectorized(uint8_t *c, const uint8_t *H, uint64_t n, uint64_t s) {
   for (size_t j = 0; j < s; j++) {
     uint8_t syndrome = 0;
@@ -243,13 +264,12 @@ __device__ void getAPP_device(uint64_t cur_L, double *score, double *APP) {
   for(size_t i=0; i<cur_L; i++) APP[i] = exp(-score[4*i+1]) * den;
 }
 
-// ===================== SOGRAND Device Implementation (Logic UNCHANGED) =====================
+// ===================== SOGRAND Device Implementation (UNCHANGED LOGIC) =====================
 __device__ void sogrand_main_logic_device(double* chat_list, double* s_list, double* T_val,
                                           double* curL_val, double* pNL_val, double* APP_list,
                                           double* llr, const uint8_t* H_flat, int n, int s,
                                           int IC, uint64_t L, uint64_t Tmax, double thres, int even,
                                           uint8_t* workspace) {
-  // Use workspace to reduce register pressure
   size_t* perm = (size_t*)workspace;
   uint8_t* cHD = workspace + 16 * sizeof(size_t);
   uint8_t* TEP = cHD + 16;
@@ -259,7 +279,6 @@ __device__ void sogrand_main_logic_device(double* chat_list, double* s_list, dou
   int32_t* d = u + 16;
   int32_t* D = d + 16;
 
-  // Initialize arrays exactly as in C code
   for(size_t i = 0; i < n; i++) perm[i] = i;
   for(size_t i = 0; i < 4*L; i++) s_list[i] = 0;
   for(size_t i = 0; i < L; i++) APP_list[i] = 0.0;
@@ -305,7 +324,6 @@ __device__ void sogrand_main_logic_device(double* chat_list, double* s_list, dou
     }
   }
 
-  // Full enumeration loop - exactly following C code (UNCHANGED)
   int32_t w = 0;
   int parity_w;
   int32_t W = 0;
@@ -352,7 +370,6 @@ __device__ void sogrand_main_logic_device(double* chat_list, double* s_list, dou
         }
       }
 
-      // Mountain descent
       for (size_t i = 0; i < w - 1; i++) d[i] = u[i+1] - u[i];
       d[w-1] = 0;
       D[w-1] = d[w-1];
@@ -424,7 +441,6 @@ __device__ int SOGRAND_bitSO_device_vectorized(double* L_APP, double* L_E, doubl
 
   int curL = (int)curL_val;
   if (curL == 0) {
-    // Vectorized initialization
     int i = 0;
     for (; i + 3 < n; i += 4) {
       double4 llr_vec = load_double4_fast(&llr[i]);
@@ -444,7 +460,6 @@ __device__ int SOGRAND_bitSO_device_vectorized(double* L_APP, double* L_E, doubl
 
     double pp1[16], pp0[16];
 
-    // Vectorized probability calculations
     int i = 0;
     for (; i + 1 < n; i += 2) {
       double2 llr_vec = load_double2_fast(&llr[i]);
@@ -480,7 +495,6 @@ __device__ int SOGRAND_bitSO_device_vectorized(double* L_APP, double* L_E, doubl
       }
     }
 
-    // Vectorized final calculations
     i = 0;
     for (; i + 1 < n; i += 2) {
       double2 p0_vec = make_double2_safe(p0[i], p0[i+1]);
@@ -519,95 +533,106 @@ __device__ int SOGRAND_bitSO_device_vectorized(double* L_APP, double* L_E, doubl
   return (int)T_val;
 }
 
-// ===================== Simple Convergence Check (keep original approach) =====================
-__device__ int check_convergence_optimized(const double* __restrict__ L_APP,
-                                          int n, int k, int batch_idx, int cw_size) {
+// ===================== OPTIMIZED Parallel Convergence Check =====================
+__device__ int check_convergence_parallel(const double* __restrict__ L_APP,
+                                         int n, int k, int batch_idx, int cw_size,
+                                         int tid) {
   const double* batch_L_APP = L_APP + (size_t)batch_idx * cw_size;
 
-  // Use registers for arrays
-  uint8_t c_HD[4096];
-  uint8_t c_test[4096];
+  __shared__ uint8_t s_c_HD[4096];
+  __shared__ uint8_t s_c_test[4096];
+  __shared__ int s_mismatch;
 
-  // Vectorized hard decision
-  int i = 0;
-  for (; i + 3 < cw_size; i += 4) {
-    double4 llr_vec = load_double4_fast(&batch_L_APP[i]);
-    int4 hd_vec = hard_decision_double4(llr_vec);
-    c_HD[i] = hd_vec.x;
-    c_HD[i+1] = hd_vec.y;
-    c_HD[i+2] = hd_vec.z;
-    c_HD[i+3] = hd_vec.w;
+  if (tid == 0) {
+    s_mismatch = 0;
   }
-  for (; i < cw_size; i++) {
-    c_HD[i] = (batch_L_APP[i] > 0.0) ? 0 : 1;
-  }
+  __syncthreads();
 
-  // Initialize
-  for (i = 0; i < cw_size; i++) {
-    c_test[i] = 0;
+  // Parallel hard decision
+  for (int i = tid; i < cw_size; i += THREADS_PER_BLOCK) {
+    s_c_HD[i] = (batch_L_APP[i] > 0.0) ? 0 : 1;
+    s_c_test[i] = 0;
   }
+  __syncthreads();
 
-  // 2a. Copy systematic message part
+  // Parallel encoding - systematic part
   for (int slice = 0; slice < k; slice++) {
-    for (int row = 0; row < k; row++) {
-      for (int col = 0; col < k; col++) {
-        int idx = IDX_FAST(row, col, slice);
-        c_test[idx] = c_HD[idx];
-      }
+    for (int idx = tid; idx < k * k; idx += THREADS_PER_BLOCK) {
+      int row = idx / k;
+      int col = idx % k;
+      int tensor_idx = IDX_FAST(row, col, slice);
+      s_c_test[tensor_idx] = s_c_HD[tensor_idx];
     }
   }
+  __syncthreads();
 
-  // 2b. Encode rows
+  // Parallel row encoding
   for (int slice = 0; slice < k; slice++) {
-    for (int row = 0; row < k; row++) {
-      for (int col = k; col < n; col++) {
-        int parity_val = 0;
-        for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-          parity_val += c_test[IDX_FAST(row, msg_bit_idx, slice)] * d_G_const[msg_bit_idx * n + col];
-        }
-        c_test[IDX_FAST(row, col, slice)] = parity_val % 2;
+    for (int idx = tid; idx < k * (n - k); idx += THREADS_PER_BLOCK) {
+      int row = idx / (n - k);
+      int col = k + (idx % (n - k));
+
+      int parity_val = 0;
+      for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
+        parity_val += s_c_test[IDX_FAST(row, msg_bit_idx, slice)] * d_G_const[msg_bit_idx * n + col];
       }
+      s_c_test[IDX_FAST(row, col, slice)] = parity_val % 2;
     }
   }
+  __syncthreads();
 
-  // 2c. Encode columns
+  // Parallel column encoding
   for (int slice = 0; slice < k; slice++) {
-    for (int col = 0; col < n; col++) {
-      for (int row = k; row < n; row++) {
-        int parity_val = 0;
-        for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-          parity_val += c_test[IDX_FAST(msg_bit_idx, col, slice)] * d_G_const[msg_bit_idx * n + row];
-        }
-        c_test[IDX_FAST(row, col, slice)] = parity_val % 2;
+    for (int idx = tid; idx < n * (n - k); idx += THREADS_PER_BLOCK) {
+      int col = idx / (n - k);
+      int row = k + (idx % (n - k));
+
+      int parity_val = 0;
+      for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
+        parity_val += s_c_test[IDX_FAST(msg_bit_idx, col, slice)] * d_G_const[msg_bit_idx * n + row];
       }
+      s_c_test[IDX_FAST(row, col, slice)] = parity_val % 2;
+    }
+  }
+  __syncthreads();
+
+  // Parallel slice encoding
+  for (int idx = tid; idx < n * n * (n - k); idx += THREADS_PER_BLOCK) {
+    int row = idx / (n * (n - k));
+    int remainder = idx % (n * (n - k));
+    int col = remainder / (n - k);
+    int slice = k + (remainder % (n - k));
+
+    int parity_val = 0;
+    for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
+      parity_val += s_c_test[IDX_FAST(row, col, msg_bit_idx)] * d_G_const[msg_bit_idx * n + slice];
+    }
+    s_c_test[IDX_FAST(row, col, slice)] = parity_val % 2;
+  }
+  __syncthreads();
+
+  // Parallel mismatch check with warp reduction
+  int local_mismatch = 0;
+  for (int i = tid; i < cw_size; i += THREADS_PER_BLOCK) {
+    if (s_c_test[i] != s_c_HD[i]) {
+      local_mismatch = 1;
+      break;
     }
   }
 
-  // 2d. Encode slices
-  for (int row = 0; row < n; row++) {
-    for (int col = 0; col < n; col++) {
-      for (int slice = k; slice < n; slice++) {
-        int parity_val = 0;
-        for (int msg_bit_idx = 0; msg_bit_idx < k; msg_bit_idx++) {
-          parity_val += c_test[IDX_FAST(row, col, msg_bit_idx)] * d_G_const[msg_bit_idx * n + slice];
-        }
-        c_test[IDX_FAST(row, col, slice)] = parity_val % 2;
-      }
-    }
+  // Warp-level reduction
+  int warp_mismatch = warp_reduce_or(local_mismatch);
+  int lane_id = tid % WARP_SIZE;
+  if (lane_id == 0 && warp_mismatch) {
+    atomicOr(&s_mismatch, 1);
   }
+  __syncthreads();
 
-  // Check if converged
-  for (i = 0; i < cw_size; i++) {
-    if (c_test[i] != c_HD[i]) {
-      return 0;
-    }
-  }
-
-  return 1; // Converged
+  return (s_mismatch == 0) ? 1 : 0;
 }
 
-// ===================== SIMPLE OPTIMIZED GPU KERNEL =====================
-__global__ void optimized_sogrand_kernel(
+// ===================== HIGHLY OPTIMIZED GPU KERNEL =====================
+__global__ void highly_optimized_sogrand_kernel(
     const double* __restrict__ L_channel,
     double* __restrict__ L_APP,
     double* __restrict__ L_E,
@@ -620,70 +645,65 @@ __global__ void optimized_sogrand_kernel(
     const int batch_id = blockIdx.x;
     if (batch_id >= total_blocks) return;
 
-    const int work_id = threadIdx.x;
-    if (work_id >= n * n) return;
-
+    const int tid = threadIdx.x;
     const int cw_size = n * n * n;
     const size_t base = (size_t)batch_id * cw_size;
 
-    // FIX 2: Reduced synchronization - simple shared memory
+    // Optimized shared memory usage
     __shared__ int iteration_count;
     __shared__ int batch_converged;
     __shared__ int warp_NG_totals[WARPS_PER_BLOCK];
     __shared__ double phase_count;
 
-    int warp_id = threadIdx.x / WARP_SIZE;
-    int lane_id = threadIdx.x % WARP_SIZE;
+    int warp_id = tid / WARP_SIZE;
+    int lane_id = tid % WARP_SIZE;
 
-    if (threadIdx.x == 0) {
+    if (tid == 0) {
         iteration_count = 1;
         batch_converged = 0;
         phase_count = 0.0;
     }
-    if (threadIdx.x < WARPS_PER_BLOCK) {
-        warp_NG_totals[threadIdx.x] = 0;
+    if (tid < WARPS_PER_BLOCK) {
+        warp_NG_totals[tid] = 0;
     }
     __syncthreads();
 
-    // Initialize arrays
-    if (work_id < n*n) {
-        for (int slice = 0; slice < n; slice++) {
-            int idx = IDX_FAST(work_id/n, work_id%n, slice);
-            L_APP[base + idx] = L_channel[base + idx];
-            L_E[base + idx] = 0.0;
-        }
+    // Parallel initialization with all threads
+    for (int idx = tid; idx < cw_size; idx += THREADS_PER_BLOCK) {
+        L_APP[base + idx] = L_channel[base + idx];
+        L_E[base + idx] = 0.0;
     }
     __syncthreads();
 
-    // Main iteration loop with simple optimization
+    // Main iteration loop
     while (iteration_count <= max_iterations && !batch_converged) {
 
         int local_NG_count = 0;
 
         // ===== COLUMNS PHASE =====
-        if (threadIdx.x == 0) {
-            phase_count += 0.5;
-        }
+        if (tid == 0) phase_count += 0.5;
 
-        if (work_id < n*n) {
-            int slice = work_id / n;
-            int col = work_id % n;
+        if (tid < n*n) {
+            int slice = tid / n;
+            int col = tid % n;
 
             double vec_in[16];
             double vec_L_APP[16];
             double vec_L_E[16];
             uint8_t local_workspace[512];
 
+            // Vectorized input preparation
+            #pragma unroll 4
             for (int row = 0; row < n; row++) {
                 int idx = IDX_FAST(row, col, slice);
-                vec_in[row] = L_channel[base + idx] +
-                             d_alpha_const[2*iteration_count-2] * L_E[base + idx];
+                vec_in[row] = L_channel[base + idx] + d_alpha_const[2*iteration_count-2] * L_E[base + idx];
             }
 
             int N_guess = SOGRAND_bitSO_device_vectorized(vec_L_APP, vec_L_E, vec_in,
                                                          d_H_const, n, k, L, Tmax, thres, even,
                                                          local_workspace);
 
+            #pragma unroll 4
             for (int row = 0; row < n; row++) {
                 int idx = IDX_FAST(row, col, slice);
                 L_APP[base + idx] = vec_L_APP[row];
@@ -693,55 +713,51 @@ __global__ void optimized_sogrand_kernel(
             local_NG_count += N_guess;
         }
 
-        // FIX 1: Warp-level NG reduction instead of atomics
         int warp_NG = warp_reduce_sum(local_NG_count);
         if (lane_id == 0) {
             atomicAdd(&warp_NG_totals[warp_id], warp_NG);
         }
-
         __syncthreads();
 
-        // Check convergence
-        if (threadIdx.x == 0) {
-            if (check_convergence_optimized(L_APP, n, k, batch_id, cw_size)) {
-                batch_converged = 1;
-            }
+        // Parallel convergence check
+        int converged = check_convergence_parallel(L_APP, n, k, batch_id, cw_size, tid);
+        if (tid == 0 && converged) {
+            batch_converged = 1;
         }
         __syncthreads();
 
         if (batch_converged) break;
 
         // ===== ROWS PHASE =====
-        if (threadIdx.x == 0) {
-            phase_count += 0.5;
-        }
+        local_NG_count = 0;
+        if (tid == 0) phase_count += 0.5;
 
-        if (work_id < n*n) {
-            int slice = work_id / n;
-            int row = work_id % n;
+        if (tid < n*n) {
+            int slice = tid / n;
+            int row = tid % n;
 
             double vec_in[16];
             double vec_L_APP[16];
             double vec_L_E[16];
             uint8_t local_workspace[512];
 
+            #pragma unroll 4
             for (int col = 0; col < n; col++) {
                 int idx = IDX_FAST(row, col, slice);
-                vec_in[col] = L_channel[base + idx] +
-                             d_alpha_const[2*iteration_count-1] * L_E[base + idx];
+                vec_in[col] = L_channel[base + idx] + d_alpha_const[2*iteration_count-1] * L_E[base + idx];
             }
 
             int N_guess = SOGRAND_bitSO_device_vectorized(vec_L_APP, vec_L_E, vec_in,
                                                          d_H_const, n, k, L, Tmax, thres, even,
                                                          local_workspace);
 
+            #pragma unroll 4
             for (int col = 0; col < n; col++) {
                 int idx = IDX_FAST(row, col, slice);
                 L_APP[base + idx] = vec_L_APP[col];
                 L_E[base + idx] = vec_L_E[col];
             }
 
-            // FIX 1: Accumulate locally, reduce per warp
             local_NG_count += N_guess;
         }
 
@@ -749,42 +765,40 @@ __global__ void optimized_sogrand_kernel(
         if (lane_id == 0) {
             atomicAdd(&warp_NG_totals[warp_id], warp_NG);
         }
-
         __syncthreads();
 
-        if (threadIdx.x == 0) {
-            if (check_convergence_optimized(L_APP, n, k, batch_id, cw_size)) {
-                batch_converged = 1;
-            }
+        converged = check_convergence_parallel(L_APP, n, k, batch_id, cw_size, tid);
+        if (tid == 0 && converged) {
+            batch_converged = 1;
         }
         __syncthreads();
 
         if (batch_converged) break;
 
         // ===== SLICES PHASE =====
-        if (threadIdx.x == 0) {
-            phase_count += 0.5;
-        }
+        local_NG_count = 0;
+        if (tid == 0) phase_count += 0.5;
 
-        if (work_id < n*n) {
-            int row = work_id / n;
-            int col = work_id % n;
+        if (tid < n*n) {
+            int row = tid / n;
+            int col = tid % n;
 
             double vec_in[16];
             double vec_L_APP[16];
             double vec_L_E[16];
             uint8_t local_workspace[512];
 
+            #pragma unroll 4
             for (int slice = 0; slice < n; slice++) {
                 int idx = IDX_FAST(row, col, slice);
-                vec_in[slice] = L_channel[base + idx] +
-                               d_alpha_const[2*iteration_count-1] * L_E[base + idx];
+                vec_in[slice] = L_channel[base + idx] + d_alpha_const[2*iteration_count-1] * L_E[base + idx];
             }
 
             int N_guess = SOGRAND_bitSO_device_vectorized(vec_L_APP, vec_L_E, vec_in,
                                                          d_H_const, n, k, L, Tmax, thres, even,
                                                          local_workspace);
 
+            #pragma unroll 4
             for (int slice = 0; slice < n; slice++) {
                 int idx = IDX_FAST(row, col, slice);
                 L_APP[base + idx] = vec_L_APP[slice];
@@ -798,12 +812,11 @@ __global__ void optimized_sogrand_kernel(
         if (lane_id == 0) {
             atomicAdd(&warp_NG_totals[warp_id], warp_NG);
         }
-
         __syncthreads();
 
-        // Final convergence check and iteration increment
-        if (threadIdx.x == 0) {
-            if (check_convergence_optimized(L_APP, n, k, batch_id, cw_size)) {
+        converged = check_convergence_parallel(L_APP, n, k, batch_id, cw_size, tid);
+        if (tid == 0) {
+            if (converged) {
                 batch_converged = 1;
             } else {
                 iteration_count++;
@@ -814,8 +827,8 @@ __global__ void optimized_sogrand_kernel(
         if (batch_converged) break;
     }
 
-    // FIX 1: Final reduction with single atomic per block
-    if (threadIdx.x == 0) {
+    // Final statistics collection
+    if (tid == 0) {
         int total_NG = 0;
         for (int w = 0; w < WARPS_PER_BLOCK; w++) {
             total_NG += warp_NG_totals[w];
@@ -827,7 +840,7 @@ __global__ void optimized_sogrand_kernel(
     }
 }
 
-// ===================== Helper Functions Implementation (Unchanged) =====================
+// ===================== Helper Functions (UNCHANGED) =====================
 int** create_int_matrix(int rows, int cols) {
   int** matrix = (int**)malloc(rows * sizeof(int*));
   for(int i = 0; i < rows; i++) {
@@ -910,7 +923,7 @@ void getGH_sys_CRC(int n, int k, int** G, int** H) {
   free(P);
 }
 
-// ===================== Main Function (Unchanged Structure) =====================
+// ===================== Main Function =====================
 int main(int argc, char *argv[]) {
   if (argc != 3) {
     fprintf(stderr, "Usage: %s <input_llr_file> <output_file>\n", argv[0]);
@@ -920,26 +933,22 @@ int main(int argc, char *argv[]) {
   const char* input_filename = argv[1];
   const char* output_filename = argv[2];
 
-  // Parameters
   const int n = 16;
   const int k = 8;
   const int cw_size = n * n * n;
   const int L = 3;
   const int Imax = 30;
-  const uint64_t Tmax = UINT64_MAX;
+  const uint64_t Tmax = TMAX_PER_COMPONENT;
   const double p_ET = 1e-5;
   const double thres = 1.0 - p_ET;
 
-  // Initialize alpha array
   double alpha[100];
   for (int i = 0; i < 100; i++) alpha[i] = 0.7;
 
-  // Get G and H matrices
   int** G = create_int_matrix(k, n);
   int** H = create_int_matrix(n - k, n);
   getGH_sys_CRC(n, k, G, H);
 
-  // Check if code is even
   int even = 1;
   for (int i = 0; i < k; i++) {
       int row_sum = 0;
@@ -952,7 +961,6 @@ int main(int argc, char *argv[]) {
       }
   }
 
-  // Flatten matrices for GPU
   uint8_t* H_flat = (uint8_t*)malloc((n-k) * n * sizeof(uint8_t));
   for (int i = 0; i < n-k; i++) {
       for (int j = 0; j < n; j++) {
@@ -967,31 +975,27 @@ int main(int argc, char *argv[]) {
       }
   }
 
-  // GPU setup
+  // GPU setup with optimizations
   CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 16384));
   CUDA_CHECK(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 128 * 1024 * 1024));
+  CUDA_CHECK(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
 
-  // Copy matrices to constant memory
   CUDA_CHECK(cudaMemcpyToSymbol(d_H_const, H_flat, (n-k) * n * sizeof(uint8_t)));
   CUDA_CHECK(cudaMemcpyToSymbol(d_G_const, G_flat, k * n * sizeof(int)));
   CUDA_CHECK(cudaMemcpyToSymbol(d_alpha_const, alpha, 100 * sizeof(double)));
 
-  // ===================== SINGLE-SHOT APPROACH =====================
-
-  // Open input file and get size
   FILE* fin = fopen(input_filename, "rb");
   if (!fin) {
       fprintf(stderr, "Error opening input file\n");
       return 1;
   }
 
-  // Get file size and calculate number of blocks
   fseek(fin, 0, SEEK_END);
   long file_size = ftell(fin);
   rewind(fin);
 
   int total_blocks = file_size / (cw_size * sizeof(double));
-  printf("Optimized Single-Shot GPU Version\n");
+  printf("Highly Optimized SOGRAND GPU Decoder\n");
   printf("Input file size: %.2f KB\n", file_size / 1024.0);
   printf("Total blocks to process: %d\n", total_blocks);
 
@@ -1001,28 +1005,23 @@ int main(int argc, char *argv[]) {
       return 1;
   }
 
-  // Calculate memory requirements
   size_t input_size = total_blocks * cw_size * sizeof(double);
-  size_t output_size = total_blocks * cw_size * sizeof(double) * 2; // L_APP + L_E
-  size_t stats_size = total_blocks * (sizeof(int) * 2 + sizeof(double)); // flags + NG + iter
+  size_t output_size = total_blocks * cw_size * sizeof(double) * 2;
+  size_t stats_size = total_blocks * (sizeof(int) * 2 + sizeof(double));
   size_t total_gpu_memory = input_size + output_size + stats_size;
 
   printf("GPU memory required: %.2f MB\n", total_gpu_memory / (1024.0 * 1024.0));
 
-  // Check GPU memory
   size_t free_mem, total_mem;
   CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
   printf("Available GPU memory: %.2f GB\n", free_mem / (1024.0 * 1024.0 * 1024.0));
 
   if (total_gpu_memory > free_mem * 0.8) {
-      fprintf(stderr, "Error: Not enough GPU memory (need %.2f MB, have %.2f MB)\n",
-              total_gpu_memory / (1024.0 * 1024.0),
-              free_mem * 0.8 / (1024.0 * 1024.0));
+      fprintf(stderr, "Error: Not enough GPU memory\n");
       fclose(fin);
       return 1;
   }
 
-  // Allocate host memory
   double* h_input = (double*)malloc(input_size);
   double* h_output = (double*)malloc(total_blocks * cw_size * sizeof(double));
   int* h_NG_count = (int*)malloc(total_blocks * sizeof(int));
@@ -1034,29 +1033,20 @@ int main(int argc, char *argv[]) {
       return 1;
   }
 
-  // Read entire file into host memory
   printf("Reading entire file into memory...\n");
   size_t bytes_read = fread(h_input, 1, input_size, fin);
   fclose(fin);
 
   if (bytes_read != input_size) {
-      fprintf(stderr, "Error: Failed to read entire file (read %zu, expected %zu)\n",
-              bytes_read, input_size);
-      free(h_input);
-      free(h_output);
-      free(h_NG_count);
-      free(h_iter_count);
+      fprintf(stderr, "Error: Failed to read entire file\n");
+      free(h_input); free(h_output); free(h_NG_count); free(h_iter_count);
       return 1;
   }
 
-  // Allocate GPU memory
   printf("Allocating GPU memory...\n");
-  double* d_L_channel;
-  double* d_L_APP;
-  double* d_L_E;
-  int* d_convergence_flags;
-  int* d_NG_count;
-  double* d_iter_count;
+  double *d_L_channel, *d_L_APP, *d_L_E;
+  int *d_convergence_flags, *d_NG_count;
+  double *d_iter_count;
 
   CUDA_CHECK(cudaMalloc(&d_L_channel, input_size));
   CUDA_CHECK(cudaMalloc(&d_L_APP, total_blocks * cw_size * sizeof(double)));
@@ -1065,33 +1055,35 @@ int main(int argc, char *argv[]) {
   CUDA_CHECK(cudaMalloc(&d_NG_count, total_blocks * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_iter_count, total_blocks * sizeof(double)));
 
-  // Copy data to GPU
   printf("Copying data to GPU...\n");
   CUDA_CHECK(cudaMemcpy(d_L_channel, h_input, input_size, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_convergence_flags, 0, total_blocks * sizeof(int)));
   CUDA_CHECK(cudaMemset(d_NG_count, 0, total_blocks * sizeof(int)));
   CUDA_CHECK(cudaMemset(d_iter_count, 0, total_blocks * sizeof(double)));
 
-  // Launch optimized kernel
-  printf("Launching optimized SOGRAND decoder kernel...\n");
-  clock_t start_time = clock();
+  printf("Launching highly optimized SOGRAND decoder kernel...\n");
 
-  // Calculate grid and block dimensions
+  // Time the actual GPU work with CUDA events (wall-clock on the device),
+  // not clock() which measures host CPU time and under-counts while the
+  // host is blocked in cudaDeviceSynchronize().
+  cudaEvent_t ev_start, ev_stop;
+  CUDA_CHECK(cudaEventCreate(&ev_start));
+  CUDA_CHECK(cudaEventCreate(&ev_stop));
+  CUDA_CHECK(cudaEventRecord(ev_start));
+
   int threads_per_block = THREADS_PER_BLOCK;
   int blocks_per_grid = MIN(total_blocks, MAX_BLOCKS_PER_KERNEL);
 
   if (total_blocks <= MAX_BLOCKS_PER_KERNEL) {
-      // Single kernel launch for all blocks
-      optimized_sogrand_kernel<<<blocks_per_grid, threads_per_block>>>(
+      highly_optimized_sogrand_kernel<<<blocks_per_grid, threads_per_block>>>(
           d_L_channel, d_L_APP, d_L_E, d_convergence_flags, d_NG_count, d_iter_count,
           n, k, L, Tmax, thres, even, Imax, total_blocks);
   } else {
-      // Multiple kernel launches if too many blocks
       int blocks_processed = 0;
       while (blocks_processed < total_blocks) {
           int blocks_this_launch = MIN(MAX_BLOCKS_PER_KERNEL, total_blocks - blocks_processed);
 
-          optimized_sogrand_kernel<<<blocks_this_launch, threads_per_block>>>(
+          highly_optimized_sogrand_kernel<<<blocks_this_launch, threads_per_block>>>(
               d_L_channel + blocks_processed * cw_size,
               d_L_APP + blocks_processed * cw_size,
               d_L_E + blocks_processed * cw_size,
@@ -1104,16 +1096,19 @@ int main(int argc, char *argv[]) {
       }
   }
 
-  CUDA_CHECK(cudaDeviceSynchronize());
-  clock_t end_time = clock();
+  CUDA_CHECK(cudaEventRecord(ev_stop));
+  CUDA_CHECK(cudaEventSynchronize(ev_stop));
 
-  // Copy results back
+  float gpu_time_ms = 0.0f;
+  CUDA_CHECK(cudaEventElapsedTime(&gpu_time_ms, ev_start, ev_stop));
+  CUDA_CHECK(cudaEventDestroy(ev_start));
+  CUDA_CHECK(cudaEventDestroy(ev_stop));
+
   printf("Copying results back from GPU...\n");
   CUDA_CHECK(cudaMemcpy(h_output, d_L_APP, total_blocks * cw_size * sizeof(double), cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(h_NG_count, d_NG_count, total_blocks * sizeof(int), cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(h_iter_count, d_iter_count, total_blocks * sizeof(double), cudaMemcpyDeviceToHost));
 
-  // Write output
   printf("Writing output file...\n");
   FILE* fout = fopen(output_filename, "wb");
   if (!fout) {
@@ -1151,7 +1146,6 @@ int main(int argc, char *argv[]) {
 
   fclose(fout);
 
-  // Calculate statistics
   long long total_NG = 0;
   double total_iterations = 0;
 
@@ -1160,7 +1154,7 @@ int main(int argc, char *argv[]) {
       total_iterations += h_iter_count[i];
   }
 
-  double gpu_time = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
+  double gpu_time = gpu_time_ms / 1000.0;
 
   printf("Decoding complete. %d block(s) decoded.\n", total_blocks);
   printf("Average iterations per block: %.2f\n", total_iterations / total_blocks);
@@ -1169,7 +1163,6 @@ int main(int argc, char *argv[]) {
   printf("Total GPU time: %.2f seconds\n", gpu_time);
   printf("Throughput: %.2f blocks/sec\n", total_blocks / gpu_time);
 
-  // Cleanup
   CUDA_CHECK(cudaFree(d_L_channel));
   CUDA_CHECK(cudaFree(d_L_APP));
   CUDA_CHECK(cudaFree(d_L_E));

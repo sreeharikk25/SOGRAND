@@ -49,7 +49,7 @@ SOGRAND/
 | Code      | (16,8)³ | cubic product code, rate `(k/n)³ = 1/8` |
 | `L`       | 3     | SOGRAND list size |
 | `Imax`    | 30    | max product-code iterations |
-| `Tmax`    | `UINT64_MAX` | max guesses per component decode (see *Performance notes*) |
+| `Tmax`    | `UINT64_MAX` (tunable via `TMAX_PER_COMPONENT`) | max guesses per component decode (see *Performance notes*) |
 | block     | `16³ = 4096` bits/codeword, `8³ = 512` info bits/codeword |
 
 ---
@@ -104,27 +104,48 @@ SNR_DB="2.5"   # Eb/N0 in dB
 
 ## Performance notes (GPU throughput)
 
-The reported *Throughput: … blocks/sec* is currently derived from `clock()`,
-which measures **CPU process time, not wall-clock GPU time**. Because the host
-blocks in `cudaDeviceSynchronize()` while the kernel runs, this figure does not
-reflect real decoder throughput. Prefer `cudaEvent` timers (or a wall-clock
-source such as `clock_gettime(CLOCK_MONOTONIC, …)`) around the kernel launch and
-synchronize.
+`cubic_decoder1.cu` has had the following throughput fixes applied:
 
-Real GPU throughput of `cubic_decoder1.cu` is also limited by:
+- **Accurate timing.** The *Throughput: … blocks/sec* figure now comes from
+  `cudaEvent` timers around the kernel launch(es), i.e. real device wall-clock.
+  It previously used `clock()`, which measures host CPU time and under-counts
+  while the host is blocked in `cudaDeviceSynchronize()` — inflating the number.
+- **No idle threads.** `THREADS_PER_BLOCK` is now `256` (= `n*n`). The component
+  decode only ever runs for `tid < n*n`, so the previous value of `512` left
+  half the block idle through the most expensive phase.
+- **Tunable abandonment cap.** `Tmax` is exposed as the `TMAX_PER_COMPONENT`
+  macro. It defaults to `UINT64_MAX` (exact C-reference behavior). Setting a
+  finite value (e.g. `-DTMAX_PER_COMPONENT=100000`) caps worst-case per-line
+  enumeration, which reduces warp divergence and improves throughput **at the
+  cost of changed decoded output / BER** — benchmark BER before relying on it.
+
+Remaining known limiters (not yet changed, since they need restructuring and
+GPU profiling to do safely):
 
 - **Low occupancy from large per-thread local memory.** Each active thread holds
   several 16-element `double` vectors plus a 512-byte workspace, and the SOGRAND
   helper allocates further per-thread arrays — over ~2 KB/thread, which spills
   registers to local memory (note `cudaLimitStackSize` is raised to 16 KB).
-- **Idle threads during the dominant phase.** The block launches
-  `THREADS_PER_BLOCK = 512` threads, but the component decode runs only for
-  `tid < n*n = 256`; the other 256 threads idle through the most expensive work.
-- **Unbounded `Tmax`.** With `Tmax = UINT64_MAX`, a single hard-to-decode
-  component can enumerate for a very long time and stall its entire warp/block
-  (lockstep divergence). A finite `Tmax` caps worst-case latency.
 - **Convergence checked after every one of the 3 phases per iteration** (up to
   ~90 full-cube re-encodes with barriers per codeword).
 
-See the "Performance notes" section above for suggested directions before
-benchmarking.
+Profile with `nvcc -Xptxas -v` (register/local-memory usage) and Nsight Compute
+(achieved occupancy) before and after any further changes. For reference,
+`ptxas -v` reports a **3744-byte stack frame and 100 registers per thread** for
+the decode kernel on `sm_89` — the local-memory pressure that caps occupancy.
+
+### Measured example (NVIDIA RTX 4070 Laptop GPU, `sm_89`, CUDA 12.0)
+
+1000 codewords, `corrupted_llrs_cubic.bin` @ SNR 2.0 dB, all runs **BER = 0**:
+
+| `Tmax` (`TMAX_PER_COMPONENT`) | GPU time | Throughput | BER |
+|-------------------------------|----------|------------|-----|
+| `UINT64_MAX` (default) | 75.8 s | 13.19 blocks/s | 0 |
+| `100000` | 75.8 s | 13.19 blocks/s | 0 |
+| `1000` | 68.4 s | 14.61 blocks/s | 0 |
+
+Note that capping `Tmax` at 100000 has **no effect**: the average is only
+~526 guesses per component decode (≈1.96 M guesses/block over ≈3725 component
+decodes), so a generous cap never binds. Only a tight cap (≤1000) helps, and
+only by ~11% here. The dominant cost is the sheer volume of serial enumeration
+plus the low occupancy above — not the abandonment cap.
